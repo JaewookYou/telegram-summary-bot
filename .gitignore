@@ -1,0 +1,44 @@
+# OS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+
+# Virtual envs
+.venv/
+venv/
+
+# Env files (keep example)
+.env
+.env.*
+!.env.example
+
+# Telegram/Telethon session files
+*.session
+*.session-journal
+*.session-wal
+*.session-shm
+
+# Logs
+logs/
+*.log
+
+# Local data & SQLite
+data/
+*.sqlite
+*.sqlite3
+
+# Editors/IDE
+.vscode/
+.idea/
+
+# Build/Dist
+dist/
+build/
+.eggs/
+

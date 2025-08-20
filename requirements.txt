@@ -1,0 +1,8 @@
+telethon==1.36.0
+openai>=1.37.0
+python-dotenv==1.0.1
+simhash==2.1.2
+pydantic==2.8.2
+tenacity==8.5.0
+
+
