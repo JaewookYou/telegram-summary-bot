@@ -5,9 +5,10 @@
 ## 주요 기능
 - LLM 분석: 요약/중요도(low/medium/high)/카테고리/태그(JSON 응답)
 - 중복 제거: SimHash(64-bit) + 해밍거리 기준, 최근 N분 윈도우 내 근사 중복 드랍
+- Forward 메시지 처리: 원본 메시지 정보 추출로 정확한 중복 체크 및 링크 생성
 - 원문 링크: 공개 `@username` → `https://t.me/<username>/<id>`, 비공개 → `https://t.me/c/<internal_id>/<id>`
 - 개인 채널로 재전송: 다른 채널 알림 OFF, 개인 채널만 ON으로 효율적 구독
-- 저장소: SQLite로 처리 이력/중복 해시/분석 결과 기록
+- 저장소: SQLite BIGINT 스키마로 대용량 메시지 ID 지원
 - 로깅: 콘솔 + 회전 파일 로그 `logs/app.log`, 에러 전용 `logs/error.log`
 - 룰 기반 중요도 부스팅: 이벤트/추첨/에어드랍/기프티콘/커피 등 키워드 포함 시 중요도 상향(참여 유도까지 있으면 high)
 
@@ -52,8 +53,8 @@ AGGREGATOR_CHANNEL=@my_private_feed
 OPENAI_API_KEY=sk-...
 OPENAI_MODEL=gpt-4o-mini
 
-# 중요도 임계값: low, medium, high (이 값 이상만 전송)
-IMPORTANT_THRESHOLD=medium
+# 중요도 임계값: low, medium, high (이 값 이상만 전송, 기본값: low)
+IMPORTANT_THRESHOLD=low
 
 # 중복 설정
 DEDUP_HAMMING_THRESHOLD=9
@@ -90,19 +91,23 @@ python -m app
 
 ## 동작 흐름
 1) 설정된 `SOURCE_CHANNELS`에서 새 메시지 수신
-2) 텍스트 정규화 후 SimHash 계산 → 최근 N분 윈도우 내 해밍거리 ≤ 임계값이면 드랍
-3) OpenAI 호출로 요약/중요도/카테고리/태그(JSON)
-4) 룰 기반 부스팅 적용(이벤트/에어드랍 등) → 중요도 상향 가능
-5) 임계값 미만은 저장만, 임계값 이상은 `AGGREGATOR_CHANNEL`로 HTML 전송(원문 링크 포함)
-6) SQLite에 결과/메타데이터 저장
+2) Forward 메시지 감지 및 원본 정보 추출 (원본 채널/메시지 ID)
+3) 텍스트 정규화 후 SimHash 계산 → 최근 N분 윈도우 내 해밍거리 ≤ 임계값이면 드랍
+4) OpenAI 호출로 요약/중요도/카테고리/태그(JSON)
+5) 룰 기반 부스팅 적용(이벤트/에어드랍 등) → 중요도 상향 가능
+6) 임계값 미만은 저장만, 임계값 이상은 `AGGREGATOR_CHANNEL`로 HTML 전송(원문 링크 포함)
+7) SQLite에 결과/메타데이터 저장 (BIGINT 스키마로 대용량 메시지 ID 지원)
 
 ## 로깅
 - 콘솔: 시작/소스 채널/수신/중복 드랍/전송/부스팅/에러 등을 INFO/ERROR로 출력
+- Forward 메시지: `[FORWARD]` 태그와 원본 정보 로그
 - 파일 로그: 회전 로그 `logs/app.log`, 에러 전용 `logs/error.log`
 ```bash
 tail -f logs/app.log
 # 에러만
 tail -f logs/error.log
+# Forward 메시지만 필터링
+grep "FORWARD" logs/app.log
 ```
 
 ## 중요도 부스팅(룰)
@@ -110,6 +115,14 @@ tail -f logs/error.log
 - 참여 유도(리트윗/팔로우/퀘스트/댓글/공유 등)까지 포함 시 high로 상향, 키워드만 있으면 최소 medium
 
 ## 트러블슈팅
+- **SQLite INTEGER 오버플로우**: Telegram 메시지 ID가 SQLite INTEGER 범위를 초과하는 경우
+  - 자동으로 BIGINT 스키마로 마이그레이션됨
+  - 백업 파일 `data/db.sqlite3.backup`에서 복구 가능
+- **Forward 메시지 중복**: 원본 메시지와 forward 메시지가 모두 처리되는 경우
+  - 자동으로 원본 메시지 정보를 기준으로 중복 체크
+  - 로그에서 `[FORWARD]` 태그로 구분 가능
+- **메시지 필터링 과다**: 중요도가 높은 메시지도 전송되지 않는 경우
+  - `IMPORTANT_THRESHOLD=low`로 설정하여 더 많은 메시지 허용
 - Telethon 세션 락(`database is locked`): 동일 세션으로 다중 실행 중일 수 있음
   - 다른 프로세스 종료 또는 세션명 변경 실행
   - 예) `TELEGRAM_SESSION=telegram_session_v2 python -m app`
@@ -123,6 +136,13 @@ tail -f logs/error.log
 
 ## 보안/버전관리
 - `.gitignore`에 `.env`, 세션(`*.session`), 로그, 로컬 DB(`data/`) 등 민감/로컬 산출물 제외
+- 데이터베이스 백업: `data/db.sqlite3.backup` 파일로 자동 백업 생성
+
+## 최근 업데이트 (v0.2)
+- **Forward 메시지 처리**: 원본 메시지 정보 추출로 정확한 중복 체크 및 링크 생성
+- **SQLite BIGINT 스키마**: 대용량 Telegram 메시지 ID 지원 (오버플로우 해결)
+- **중요도 임계값 조정**: 기본값을 "low"로 변경하여 더 많은 메시지 전달
+- **향상된 로깅**: Forward 메시지 감지 및 원본 정보 로그 추가
 
 ## 라이선스
 - 개인 사용 목적 예제. 상업/배포 시 각 API 약관/요금/정책을 준수하세요.

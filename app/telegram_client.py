@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
-from telethon import TelegramClient, events
+from telethon import TelegramClient, events, utils
 from telethon.tl.types import Message
 
 
@@ -32,15 +32,19 @@ class TG:
         title = getattr(entity, "title", getattr(entity, "first_name", str(identifier)))
         username = getattr(entity, "username", None)
         is_public = username is not None
-        chat_id = getattr(entity, "id", 0)
+
+        # Use peer_id (-100... for channels/supergroups) to make event filters match
+        peer_id = utils.get_peer_id(entity)
+
+        # For private channel links: internal id is abs(peer_id) without leading 100
         internal_id = None
-        # For private channel links: internal id is abs(chat_id) stripped of -100 prefix
-        if isinstance(chat_id, int) and chat_id < 0:
-            # channel ids often like -1001234567890 → internal 1234567890
-            internal_id = abs(chat_id) if str(abs(chat_id)).startswith("100") else None
-            if internal_id and str(internal_id).startswith("100"):
-                internal_id = int(str(internal_id)[3:])
-        return ChannelMeta(chat_id=chat_id, title=title, username=username, internal_id=internal_id, is_public=is_public)
+        if isinstance(peer_id, int):
+            peer_abs = abs(peer_id)
+            s = str(peer_abs)
+            if s.startswith("100"):
+                internal_id = int(s[3:])
+
+        return ChannelMeta(chat_id=peer_id, title=title, username=username, internal_id=internal_id, is_public=is_public)
 
     async def send_html(self, target: str | int, html: str) -> Message:
         return await self.client.send_message(target, html, parse_mode="html", link_preview=False)

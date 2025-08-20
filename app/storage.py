@@ -45,8 +45,8 @@ class SQLiteStore:
                 """
                 CREATE TABLE IF NOT EXISTS messages (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    chat_id INTEGER NOT NULL,
-                    message_id INTEGER NOT NULL,
+                    chat_id BIGINT NOT NULL,
+                    message_id BIGINT NOT NULL,
                     date_ts INTEGER NOT NULL,
                     author TEXT,
                     text TEXT NOT NULL,

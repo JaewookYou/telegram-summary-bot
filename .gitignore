@@ -24,6 +24,8 @@ venv/
 *.session-wal
 *.session-shm
 
+*.cursorrules
+
 # Logs
 logs/
 *.log

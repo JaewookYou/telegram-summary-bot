@@ -40,7 +40,7 @@ def load_settings() -> Settings:
     openai_api_key = os.getenv("OPENAI_API_KEY", "")
     openai_model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
-    important_threshold = os.getenv("IMPORTANT_THRESHOLD", "medium").lower()
+    important_threshold = os.getenv("IMPORTANT_THRESHOLD", "low").lower()
     dedup_hamming_threshold = int(os.getenv("DEDUP_HAMMING_THRESHOLD", "9"))
     dedup_recent_minutes = int(os.getenv("DEDUP_RECENT_MINUTES", "360"))
 

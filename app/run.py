@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 from app.config import load_settings
 from app.dedup import compute_simhash, normalize_text
@@ -19,6 +19,40 @@ import os
 
 
 IMPORTANCE_ORDER = {"low": 0, "medium": 1, "high": 2}
+
+
+def extract_forward_info(msg) -> Tuple[bool, Optional[int], Optional[int], Optional[str]]:
+    """
+    메시지가 forward된 것인지 확인하고 원본 정보를 추출
+    
+    Returns:
+        Tuple[is_forward, original_chat_id, original_message_id, original_text]
+    """
+    # Telethon에서 forward 정보 확인
+    if hasattr(msg, 'forward') and msg.forward:
+        # Forward된 메시지인 경우
+        original_chat_id = None
+        original_message_id = None
+        original_text = None
+        
+        # 원본 채널/채팅 정보 추출
+        if hasattr(msg.forward, 'chat_id'):
+            original_chat_id = msg.forward.chat_id
+        elif hasattr(msg.forward, 'channel_id'):
+            original_chat_id = msg.forward.channel_id
+        elif hasattr(msg.forward, 'user_id'):
+            original_chat_id = msg.forward.user_id
+            
+        # 원본 메시지 ID 추출
+        if hasattr(msg.forward, 'id'):
+            original_message_id = msg.forward.id
+            
+        # 원본 텍스트는 현재 메시지의 텍스트 사용 (forward 시 텍스트가 복사됨)
+        original_text = getattr(msg, 'message', '')
+        
+        return True, original_chat_id, original_message_id, original_text
+    
+    return False, None, None, None
 
 
 async def main() -> None:
@@ -83,30 +117,55 @@ async def main() -> None:
     async def handle_message(event):
         mlog = logging.getLogger("app.msg")
         msg = event.message
-        if not getattr(msg, "message", "").strip():
-            mlog.debug("Skip non-text message")
-            return
 
-        chat = getattr(event, "chat", None)
-        chat_id = getattr(chat, "id", None)
+        # Use event.chat_id directly; event.chat can be None depending on cache/state
+        chat_id = getattr(event, "chat_id", None) or getattr(getattr(event, "chat", None), "id", None)
         if chat_id is None:
-            mlog.debug("Missing chat_id")
+            mlog.warning("Missing chat_id on event; dropping")
             return
 
-        text = normalize_text(msg.message)
+        # Log non-text messages as well
+        if not getattr(msg, "message", "").strip():
+            meta = channel_cache.get(chat_id) or {}
+            mlog.info(
+                f"수신 메시지(비텍스트): {meta.get('title','Unknown')} ({meta.get('username') or chat_id}) "
+                f"msg_id={msg.id}"
+            )
+            return
+
+        # Forward 메시지 확인 및 원본 정보 추출
+        is_forward, original_chat_id, original_message_id, original_text = extract_forward_info(msg)
+        
+        # Forward된 메시지인 경우 원본 텍스트 사용, 아니면 현재 텍스트 사용
+        if is_forward and original_text:
+            text = normalize_text(original_text)
+            mlog.info(f"Forward 메시지 감지: 원본 chat_id={original_chat_id}, msg_id={original_message_id}")
+        else:
+            text = normalize_text(msg.message)
+        
         meta = channel_cache.get(chat_id) or {}
         snippet = text[:200] + ("…" if len(text) > 200 else "")
+        
+        # Forward 여부를 로그에 포함
+        forward_info = " [FORWARD]" if is_forward else ""
         mlog.info(
-            f"수신 메시지: {meta.get('title','Unknown')} ({meta.get('username') or chat_id}) "
+            f"수신 메시지{forward_info}: {meta.get('title','Unknown')} ({meta.get('username') or chat_id}) "
             f"msg_id={msg.id}, len={len(text)} | {snippet}"
         )
+        
         sim = compute_simhash(text)
 
         now_ts = int(datetime.utcnow().timestamp())
         since_ts = now_ts - settings.dedup_recent_minutes * 60
+        
+        # Forward된 메시지인 경우 원본 메시지 ID로 중복 체크
+        check_message_id = original_message_id if is_forward and original_message_id else msg.id
+        check_chat_id = original_chat_id if is_forward and original_chat_id else chat_id
+        
         similar = store.find_recent_similar(sim, since_ts, settings.dedup_hamming_threshold)
         if similar:
-            mlog.info(f"Duplicate dropped (chat_id={chat_id}, msg_id={msg.id})")
+            similar_chat_id, similar_msg_id, _ = similar
+            mlog.info(f"Duplicate dropped (current: chat_id={chat_id}, msg_id={msg.id}, check: chat_id={check_chat_id}, msg_id={check_message_id})")
             return  # duplicate
 
         # Insert preliminary record
@@ -144,11 +203,45 @@ async def main() -> None:
             )
         analysis.importance = boosted_importance
 
-        # Importance thresholding
-        if IMPORTANCE_ORDER.get(analysis.importance, 0) < IMPORTANCE_ORDER.get(
-            settings.important_threshold, 1
-        ):
-            # Store analysis but do not forward
+        # Forward된 메시지의 경우 원본 링크 생성
+        if is_forward and original_chat_id and original_message_id:
+            # 원본 채널 메타데이터 가져오기 (캐시에서 찾거나 새로 생성)
+            original_meta = channel_cache.get(original_chat_id)
+            if not original_meta:
+                try:
+                    # 원본 채널 정보를 가져와서 캐시에 저장
+                    original_entity = await tg.client.get_entity(original_chat_id)
+                    original_meta = {
+                        "title": getattr(original_entity, "title", f"Channel {original_chat_id}"),
+                        "username": getattr(original_entity, "username", None),
+                        "is_public": bool(getattr(original_entity, "username", None)),
+                        "internal_id": None
+                    }
+                    if not original_meta["is_public"]:
+                        # 비공개 채널의 경우 internal_id 계산
+                        from telethon import utils
+                        peer_id = utils.get_peer_id(original_entity)
+                        if isinstance(peer_id, int):
+                            peer_abs = abs(peer_id)
+                            s = str(peer_abs)
+                            if s.startswith("100"):
+                                original_meta["internal_id"] = int(s[3:])
+                    channel_cache[original_chat_id] = original_meta
+                except Exception as e:
+                    mlog.warning(f"원본 채널 정보 가져오기 실패: {e}")
+                    original_meta = {"title": f"Unknown Channel {original_chat_id}", "username": None, "is_public": False, "internal_id": None}
+            
+            # 원본 메시지 링크 생성
+            orig_link = build_original_link(
+                chat_id=original_chat_id,
+                message_id=original_message_id,
+                is_public=bool(original_meta.get("is_public")),
+                username=original_meta.get("username"),
+                internal_id=original_meta.get("internal_id"),
+            )
+            source_title = original_meta.get("title", f"Unknown Channel {original_chat_id}")
+        else:
+            # 일반 메시지의 경우 현재 채널 링크 사용
             meta = channel_cache.get(chat_id) or {}
             orig_link = build_original_link(
                 chat_id=chat_id,
@@ -157,6 +250,13 @@ async def main() -> None:
                 username=meta.get("username"),
                 internal_id=meta.get("internal_id"),
             )
+            source_title = meta.get("title", "Unknown")
+
+        # Importance thresholding
+        if IMPORTANCE_ORDER.get(analysis.importance, 0) < IMPORTANCE_ORDER.get(
+            settings.important_threshold, 1
+        ):
+            # Store analysis but do not forward
             store.update_analysis(
                 chat_id=chat_id,
                 message_id=message_id,
@@ -170,16 +270,8 @@ async def main() -> None:
             return
 
         # Forward to aggregator channel
-        meta = channel_cache.get(chat_id) or {}
-        orig_link = build_original_link(
-            chat_id=chat_id,
-            message_id=message_id,
-            is_public=bool(meta.get("is_public")),
-            username=meta.get("username"),
-            internal_id=meta.get("internal_id"),
-        )
         html = format_html(
-            source_title=meta.get("title", "Unknown"),
+            source_title=source_title,
             summary=analysis.summary,
             importance=analysis.importance,
             categories=analysis.categories,
@@ -202,9 +294,10 @@ async def main() -> None:
             summary=analysis.summary,
             original_link=orig_link,
         )
-        mlog.info(f"Forwarded message (chat_id={chat_id}, msg_id={message_id}, importance={analysis.importance})")
+        forward_log = f" [FORWARD from {original_chat_id}:{original_message_id}]" if is_forward else ""
+        mlog.info(f"Forwarded message (chat_id={chat_id}, msg_id={message_id}, importance={analysis.importance}){forward_log}")
 
-    tg.on_new_message(handle_message, chats=chat_filters)
+    tg.on_new_message(handle_message, chats=None)
     logger.info("Listening... (Ctrl+C to stop)")
     await asyncio.Future()  # run forever
 
