@@ -664,7 +664,7 @@ async def main() -> None:
             
             # high 중요도인 경우 중요 채널로도 중복 전송
             should_send_to_important = (
-                analysis.importance == "high"
+                analysis.importance == "high" or analysis.importance == "medium"
             )
             
             if should_send_to_important:
@@ -700,8 +700,7 @@ async def main() -> None:
                 
                 # 중요 봇 알림 (medium 이상 + 돈버는 정보)
                 is_important = (
-                    analysis.importance in ["medium", "high"] or
-                    (analysis.money_making_info and analysis.money_making_info != "없음")
+                    analysis.importance in ["medium", "high"]
                 )
                 
                 if is_important and bot_notifier.important_bot_token:
