@@ -34,6 +34,7 @@ def format_html(
     tags: List[str],
     money_making_info: str,
     action_guide: str,
+    event_products: str,
     original_link: str,
     image_content: Optional[dict] = None,
     link_content: Optional[dict] = None,
@@ -71,10 +72,10 @@ def format_html(
         f"{body_style}\n"
     )
 
-    # 원문 일부 추가(요청 사항)
-    if original_snippet:
-        snippet = escape(original_snippet)
-        html += f"<b>원문 일부:</b>\n<blockquote>{snippet}</blockquote>\n"
+    # # 원문 일부 추가(요청 사항)
+    # if original_snippet:
+    #     snippet = escape(original_snippet)
+    #     html += f"<b>원문 일부:</b>\n<blockquote>{snippet}</blockquote>\n"
 
     html += (
         f"<b>Categories:</b> {cats}\n"
@@ -87,6 +88,11 @@ def format_html(
         action = escape(action_guide)
         html += f"<b>💰 돈 버는 정보:</b> {money_info}\n"
         html += f"<b>🎯 행동 가이드:</b> {action}\n"
+    
+    # 이벤트 상품 정보 추가
+    if event_products and event_products != "없음":
+        products = escape(event_products)
+        html += f"<b>🎁 이벤트 상품:</b> {products}\n"
     
     # 이미지 정보 추가
     if image_content:

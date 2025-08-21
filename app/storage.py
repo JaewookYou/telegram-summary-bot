@@ -20,12 +20,14 @@ class MessageRecord:
     author: Optional[str]
     text: str
     embedding: str  # JSON 형태의 임베딩 벡터
+    text_hash: str  # 원본 텍스트의 해시값 (중복 제거용)
     importance: str
     categories: str
     tags: str
     summary: str
     money_making_info: str
     action_guide: str
+    event_products: str
     original_link: str
 
 
@@ -40,6 +42,7 @@ class MoneyMessageRecord:
     forward_text: str   # 포워딩된 경우 포워딩 텍스트
     money_making_info: str
     action_guide: str
+    event_products: str
     image_paths: str    # JSON 형태의 이미지 경로들
     forward_info: str   # JSON 형태의 포워딩 정보
     original_link: str
@@ -97,6 +100,16 @@ class SQLiteStore:
                 if 'action_guide' not in column_names:
                     logger.info("action_guide 컬럼 추가 중...")
                     c.execute("ALTER TABLE messages ADD COLUMN action_guide TEXT DEFAULT ''")
+                
+                # event_products 컬럼이 없으면 추가
+                if 'event_products' not in column_names:
+                    logger.info("event_products 컬럼 추가 중...")
+                    c.execute("ALTER TABLE messages ADD COLUMN event_products TEXT DEFAULT ''")
+                
+                # text_hash 컬럼이 없으면 추가
+                if 'text_hash' not in column_names:
+                    logger.info("text_hash 컬럼 추가 중...")
+                    c.execute("ALTER TABLE messages ADD COLUMN text_hash TEXT DEFAULT ''")
             
             # money_messages 테이블 생성 (돈버는 정보 메시지 전용)
             c.execute("""
@@ -110,6 +123,7 @@ class SQLiteStore:
                     forward_text TEXT NOT NULL DEFAULT '',
                     money_making_info TEXT NOT NULL,
                     action_guide TEXT NOT NULL DEFAULT '',
+                    event_products TEXT NOT NULL DEFAULT '',
                     image_paths TEXT NOT NULL DEFAULT '[]',
                     forward_info TEXT NOT NULL DEFAULT '{}',
                     original_link TEXT NOT NULL DEFAULT '',
@@ -143,6 +157,8 @@ class SQLiteStore:
                         summary TEXT NOT NULL,
                         money_making_info TEXT NOT NULL DEFAULT '',
                         action_guide TEXT NOT NULL DEFAULT '',
+                        event_products TEXT NOT NULL DEFAULT '',
+                        text_hash TEXT NOT NULL DEFAULT '',
                         original_link TEXT NOT NULL,
                         UNIQUE(chat_id, message_id)
                     )
@@ -161,6 +177,7 @@ class SQLiteStore:
         author: Optional[str],
         text: str,
         embedding_value: str,  # JSON 형태의 임베딩 벡터
+        text_hash: str,  # 원본 텍스트의 해시값
         importance: Optional[str] = None,
         categories: Optional[str] = None,
         tags: Optional[str] = None,
@@ -184,8 +201,8 @@ class SQLiteStore:
                 c.execute(
                     """
                     INSERT OR IGNORE INTO messages (
-                        chat_id, message_id, date_ts, author, text, embedding, importance, categories, tags, summary, original_link
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        chat_id, message_id, date_ts, author, text, embedding, text_hash, importance, categories, tags, summary, original_link
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         chat_id,
@@ -194,6 +211,7 @@ class SQLiteStore:
                         author,
                         text,
                         embedding_value,  # JSON 형태의 임베딩 벡터
+                        text_hash,  # 원본 텍스트의 해시값
                         importance,
                         categories,
                         tags,
@@ -218,6 +236,7 @@ class SQLiteStore:
         summary: str,
         money_making_info: str,
         action_guide: str,
+        event_products: str,
         original_link: str,
     ) -> None:
         with self.connect() as conn:
@@ -225,10 +244,10 @@ class SQLiteStore:
             c.execute(
                 """
                 UPDATE messages 
-                SET importance = ?, categories = ?, tags = ?, summary = ?, money_making_info = ?, action_guide = ?, original_link = ?
+                SET importance = ?, categories = ?, tags = ?, summary = ?, money_making_info = ?, action_guide = ?, event_products = ?, original_link = ?
                 WHERE chat_id = ? AND message_id = ?
                 """,
-                (importance, categories, tags, summary, money_making_info, action_guide, original_link, chat_id, message_id),
+                (importance, categories, tags, summary, money_making_info, action_guide, event_products, original_link, chat_id, message_id),
             )
             conn.commit()
 
@@ -282,6 +301,53 @@ class SQLiteStore:
                 
         return best
 
+    def find_exact_duplicate(self, text_hash: str, since_ts: int) -> Optional[Tuple[int, int]]:
+        """텍스트 해시를 사용하여 정확한 중복 메시지를 찾습니다."""
+        with self.connect() as conn:
+            c = conn.cursor()
+            c.execute(
+                """
+                SELECT chat_id, message_id
+                FROM messages
+                WHERE date_ts >= ? AND text_hash = ?
+                ORDER BY date_ts DESC
+                LIMIT 1
+                """,
+                (since_ts, text_hash),
+            )
+            row = c.fetchone()
+            return row if row else None
+
+    def is_message_processed(self, chat_id: int, message_id: int) -> bool:
+        """메시지가 이미 처리되었는지 확인합니다."""
+        with self.connect() as conn:
+            c = conn.cursor()
+            c.execute(
+                """
+                SELECT COUNT(*)
+                FROM messages
+                WHERE chat_id = ? AND message_id = ?
+                """,
+                (chat_id, message_id),
+            )
+            count = c.fetchone()[0]
+            return count > 0
+
+    def get_last_processed_message_id(self, chat_id: int) -> Optional[int]:
+        """채널에서 마지막으로 처리된 메시지 ID를 반환합니다."""
+        with self.connect() as conn:
+            c = conn.cursor()
+            c.execute(
+                """
+                SELECT MAX(message_id)
+                FROM messages
+                WHERE chat_id = ?
+                """,
+                (chat_id,),
+            )
+            result = c.fetchone()[0]
+            return result if result else None
+
     def get_message_count(self) -> int:
         """총 메시지 개수를 반환"""
         with self.connect() as conn:
@@ -313,6 +379,7 @@ class SQLiteStore:
         forward_text: str,
         money_making_info: str,
         action_guide: str,
+        event_products: str,
         image_paths: list,
         forward_info: dict,
         original_link: str,
@@ -331,9 +398,9 @@ class SQLiteStore:
                     """
                     INSERT OR REPLACE INTO money_messages (
                         chat_id, message_id, date_ts, author, original_text, forward_text,
-                        money_making_info, action_guide, image_paths, forward_info,
+                        money_making_info, action_guide, event_products, image_paths, forward_info,
                         original_link, importance, categories, tags, summary
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         chat_id,
@@ -344,6 +411,7 @@ class SQLiteStore:
                         forward_text,
                         money_making_info,
                         action_guide,
+                        event_products,
                         json.dumps(image_paths),
                         json.dumps(forward_info),
                         original_link,
@@ -369,7 +437,7 @@ class SQLiteStore:
             c.execute(
                 """
                 SELECT id, chat_id, message_id, date_ts, author, original_text, forward_text,
-                       money_making_info, action_guide, image_paths, forward_info,
+                       money_making_info, action_guide, event_products, image_paths, forward_info,
                        original_link, importance, categories, tags, summary
                 FROM money_messages
                 ORDER BY date_ts DESC
@@ -392,13 +460,14 @@ class SQLiteStore:
                         forward_text=row[6],
                         money_making_info=row[7],
                         action_guide=row[8],
-                        image_paths=row[9],
-                        forward_info=row[10],
-                        original_link=row[11],
-                        importance=row[12],
-                        categories=row[13],
-                        tags=row[14],
-                        summary=row[15],
+                        event_products=row[9],
+                        image_paths=row[10],
+                        forward_info=row[11],
+                        original_link=row[12],
+                        importance=row[13],
+                        categories=row[14],
+                        tags=row[15],
+                        summary=row[16],
                     )
                     records.append(record)
                 except Exception as e:

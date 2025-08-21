@@ -16,6 +16,7 @@ class AnalysisResult:
     summary: str
     money_making_info: str
     action_guide: str
+    event_products: str
 
 
 SYSTEM_PROMPT = (
@@ -27,7 +28,8 @@ SYSTEM_PROMPT = (
     "- summary: 2~4문장 요약, 한국어\n"
     "- money_making_info: 돈을 버는데 활용할 수 있는 정보인가? (예: '에어드랍 정보', '거래 기회', '투자 정보', '없음')\n"
     "- action_guide: 구체적인 행동 가이드 (예: '지갑 생성 후 참여', '모니터링 필요', '즉시 매수 고려', '추가 정보 대기')\n"
-    "출력은 반드시 JSON 하나만, 키: importance,categories,tags,summary,money_making_info,action_guide"
+    "- event_products: 이벤트/에어드랍/프로모션인 경우 상품/보상 정보 (예: '신세계상품권 10만원', '스타벅스 커피 30잔', '없음')\n"
+    "출력은 반드시 JSON 하나만, 키: importance,categories,tags,summary,money_making_info,action_guide,event_products"
 )
 
 
@@ -63,13 +65,15 @@ class OpenAILLM:
         summary = str(data.get("summary", "")).strip()
         money_making_info = str(data.get("money_making_info", "없음")).strip()
         action_guide = str(data.get("action_guide", "추가 정보 대기")).strip()
+        event_products = str(data.get("event_products", "없음")).strip()
         return AnalysisResult(
             importance=importance, 
             categories=categories, 
             tags=tags, 
             summary=summary,
             money_making_info=money_making_info,
-            action_guide=action_guide
+            action_guide=action_guide,
+            event_products=event_products
         )
 
 

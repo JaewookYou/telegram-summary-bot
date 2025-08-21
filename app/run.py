@@ -281,6 +281,11 @@ async def main() -> None:
             mlog.warning("❌ 메시지 버림: chat_id 없음")
             return
 
+        # 이미 처리된 메시지인지 확인
+        if store.is_message_processed(chat_id, msg.id):
+            mlog.info(f"⏭️ 메시지 건너뜀: 이미 처리된 메시지 (chat_id={chat_id}, msg_id={msg.id})")
+            return
+
         # 모든 메시지에 대한 기본 로깅 (디버깅용)
         message_text = getattr(msg, "message", "").strip()
         mlog.info(f"📨 메시지 수신: chat_id={chat_id}, msg_id={msg.id}, len={len(message_text)}, preview={message_text[:50]}...")
@@ -450,8 +455,15 @@ async def main() -> None:
             f"msg_id={msg.id}, len={len(text)} | {snippet}"
         )
         
-        # 임베딩 생성 및 중복 제거
-        embedding = await embedding_client.get_embedding(text)
+        # 임베딩 생성 및 중복 제거 (원문 기준)
+        # 포워딩된 메시지의 경우 원본 텍스트로 임베딩 생성
+        embedding_text = text  # 이미 포워딩된 메시지의 경우 원본 텍스트가 text에 설정됨
+        
+        # 텍스트 해시 생성 (정확한 중복 제거용)
+        import hashlib
+        text_hash = hashlib.md5(embedding_text.encode('utf-8')).hexdigest()
+        
+        embedding = await embedding_client.get_embedding(embedding_text)
         if not embedding:
             mlog.warning(f"임베딩 생성 실패, 중복 제거 없이 처리 계속: chat_id={chat_id}, msg_id={msg.id}")
             # 임베딩 실패 시에도 메시지 처리를 계속하되, 중복 제거는 건너뜀
@@ -465,15 +477,24 @@ async def main() -> None:
         check_message_id = original_message_id if is_forward and original_message_id else msg.id
         check_chat_id = original_chat_id if is_forward and original_chat_id else chat_id
         
-        # 임베딩이 있는 경우에만 중복 제거 수행
+        # 1단계: 정확한 텍스트 해시 중복 제거
+        exact_duplicate = store.find_exact_duplicate(text_hash, since_ts)
+        if exact_duplicate:
+            duplicate_chat_id, duplicate_msg_id = exact_duplicate
+            mlog.info(f"❌ 메시지 버림: 정확한 중복 메시지 (현재: chat_id={chat_id}, msg_id={msg.id}, 중복: chat_id={duplicate_chat_id}, msg_id={duplicate_msg_id})")
+            mlog.info(f"중복 제거 기준 텍스트: {embedding_text[:100]}...")
+            return  # exact duplicate
+        
+        # 2단계: 임베딩 기반 유사도 중복 제거
         if embedding_json != "[]":
             similar = store.find_recent_similar(embedding_json, since_ts, settings.dedup_similarity_threshold, embedding_client)
             if similar:
                 similar_chat_id, similar_msg_id, similarity_score = similar
-                mlog.info(f"❌ 메시지 버림: 중복 메시지 (현재: chat_id={chat_id}, msg_id={msg.id}, 체크: chat_id={check_chat_id}, msg_id={check_message_id}) - 유사도 점수: {similarity_score:.3f}, 임계값: {settings.dedup_similarity_threshold}")
-                return  # duplicate
+                mlog.info(f"❌ 메시지 버림: 유사한 중복 메시지 (현재: chat_id={chat_id}, msg_id={msg.id}, 체크: chat_id={check_chat_id}, msg_id={check_message_id}) - 유사도 점수: {similarity_score:.3f}, 임계값: {settings.dedup_similarity_threshold}")
+                mlog.info(f"중복 제거 기준 텍스트: {embedding_text[:100]}...")
+                return  # similar duplicate
         else:
-            mlog.info(f"임베딩 없음, 중복 제거 건너뜀: chat_id={chat_id}, msg_id={msg.id}")
+            mlog.info(f"임베딩 없음, 유사도 중복 제거 건너뜀: chat_id={chat_id}, msg_id={msg.id}")
 
         # Insert preliminary record
         # Forward된 메시지인 경우 원본 정보 사용, 아니면 현재 메시지 정보 사용
@@ -489,6 +510,7 @@ async def main() -> None:
             author=author,
             text=text,
             embedding_value=embedding_json,
+            text_hash=text_hash,
         )
 
         # LLM analysis
@@ -595,16 +617,18 @@ async def main() -> None:
         
         # 내용 없는 요약 필터링
         meaningless_summary_patterns = [
-            r'제공된 원문은 구체적인 내용이 부족하여 요약하기 어렵습니다',
-            r'추가적인 정보나 문맥이 필요합니다',
-            r'요약할 수 있는 구체적인 내용이 없습니다',
-            r'내용이 부족하여 요약하기 어렵습니다',
-            r'구체적인 정보가 부족합니다',
-            r'요약할 만한 내용이 없습니다',
+            r'구체적인 내용이 부족',
+            r'요약하기 어렵습니다',
+            r'추가적인 정보나 문맥이 필요',
+            r'요약할 수 있는 구체적인 내용이 없',
+            r'내용이 부족하여 요약하기 어렵',
+            r'구체적인 정보가 부족',
+            r'요약할 만한 내용이',
             r'추가 정보가 필요합니다',
-            r'문맥이 부족합니다',
+            r'문맥이 부족',
             r'구체적인 내용이 없습니다',
-            r'요약하기 어려운 내용입니다'
+            r'요약하기 어려운 내용입니다',
+            r'추가적인 내용이나 맥락이 부족'
         ]
         
         is_meaningless_summary = any(re.search(pattern, analysis.summary, re.IGNORECASE) for pattern in meaningless_summary_patterns)
@@ -624,6 +648,7 @@ async def main() -> None:
                 summary=analysis.summary,
                 money_making_info=analysis.money_making_info,
                 action_guide=analysis.action_guide,
+                event_products=analysis.event_products,
                 original_link=orig_link,
             )
             mlog.info(f"❌ 메시지 버림: 중요도 부족 (chat_id={chat_id}, msg_id={message_id}, importance={analysis.importance} < {settings.important_threshold}, 텍스트 길이: {len(text)}자)")
@@ -650,6 +675,7 @@ async def main() -> None:
             tags=analysis.tags,
             money_making_info=analysis.money_making_info,
             action_guide=analysis.action_guide,
+            event_products=analysis.event_products,
             original_link=orig_link,
             image_content=image_content,
             link_content=link_content,
@@ -685,6 +711,7 @@ async def main() -> None:
                     tags=analysis.tags,
                     money_making_info=analysis.money_making_info,
                     action_guide=analysis.action_guide,
+                    event_products=analysis.event_products,
                     original_link=orig_link,
                     image_content=image_content,
                     link_content=link_content,
@@ -746,6 +773,7 @@ async def main() -> None:
             summary=analysis.summary,
             money_making_info=analysis.money_making_info,
             action_guide=analysis.action_guide,
+            event_products=analysis.event_products,
             original_link=orig_link,
         )
         
@@ -773,6 +801,7 @@ async def main() -> None:
                     forward_text=forward_text,
                     money_making_info=analysis.money_making_info,
                     action_guide=analysis.action_guide,
+                    event_products=analysis.event_products,
                     image_paths=image_paths,
                     forward_info=forward_info or {},
                     original_link=orig_link,
@@ -822,7 +851,30 @@ async def main() -> None:
     # 폴링 방식으로 메시지 수신 (실시간 수신 대안)
     async def poll_messages():
         logger.info("=== 폴링 방식 메시지 수신 시작 ===")
-        last_message_ids = {}  # 채널별 마지막 메시지 ID 추적
+        
+        # 초기화: 각 채널의 마지막 처리된 메시지 ID를 데이터베이스에서 가져오기
+        last_message_ids = {}
+        for channel_id in chat_filters:
+            last_processed_id = store.get_last_processed_message_id(channel_id)
+            if last_processed_id:
+                last_message_ids[channel_id] = last_processed_id
+                logger.info(f"채널 {channel_id} 마지막 처리된 메시지 ID: {last_processed_id}")
+            else:
+                # 데이터베이스에 기록이 없으면 최근 메시지부터 시작
+                try:
+                    chat = entity_cache.get(channel_id)
+                    if not chat:
+                        chat = await tg.client.get_entity(channel_id)
+                        if chat:
+                            entity_cache[channel_id] = chat
+                    
+                    if chat:
+                        messages = await tg.client.get_messages(chat, limit=1)
+                        if messages:
+                            last_message_ids[channel_id] = messages[0].id
+                            logger.info(f"채널 {channel_id} 최신 메시지 ID로 초기화: {messages[0].id}")
+                except Exception as e:
+                    logger.warning(f"채널 {channel_id} 초기화 실패: {e}")
         
         while True:
             try:
@@ -839,25 +891,23 @@ async def main() -> None:
                             # 엔티티 캐시에 저장
                             entity_cache[channel_id] = chat
                         
-                        # 최근 메시지 가져오기 (최대 10개)
-                        messages = await tg.client.get_messages(chat, limit=10)
+                        # 마지막 처리된 메시지 ID 이후의 메시지만 가져오기
+                        last_known_id = last_message_ids.get(channel_id, 0)
+                        messages = await tg.client.get_messages(chat, min_id=last_known_id, limit=20)
                         
                         if not messages:
                             continue
                             
-                        # 마지막 메시지 ID 확인
-                        latest_msg_id = messages[0].id
-                        last_known_id = last_message_ids.get(channel_id, latest_msg_id - 1)
-                        
                         # 새로운 메시지가 있는지 확인
-                        if latest_msg_id > last_known_id:
+                        if messages:
                             # 안전한 채널 제목 접근
                             channel_title = getattr(chat, 'title', f'Channel {channel_id}')
-                            logger.info(f"🔍 폴링으로 새 메시지 발견: {channel_title} (ID: {latest_msg_id})")
+                            logger.info(f"🔍 폴링으로 새 메시지 발견: {channel_title} ({len(messages)}개)")
                             
-                            # 새로운 메시지들 처리
-                            for msg in reversed(messages):
-                                if msg.id > last_known_id:
+                            # 새로운 메시지들 처리 (ID 순서대로)
+                            for msg in messages:
+                                # 이미 처리된 메시지인지 한번 더 확인
+                                if not store.is_message_processed(channel_id, msg.id):
                                     # 메시지를 이벤트 객체로 래핑하여 handle_message 호출
                                     try:
                                         # 메시지 객체를 이벤트 객체로 래핑
@@ -872,9 +922,12 @@ async def main() -> None:
                                         logger.info(f"✅ 폴링 메시지 처리 완료: {channel_title} (ID: {msg.id})")
                                     except Exception as e:
                                         logger.error(f"❌ 폴링 메시지 처리 실패: {channel_title} (ID: {msg.id}) - {e}")
+                                else:
+                                    logger.debug(f"⏭️ 이미 처리된 메시지 건너뜀: {channel_title} (ID: {msg.id})")
                             
                             # 마지막 메시지 ID 업데이트
-                            last_message_ids[channel_id] = latest_msg_id
+                            if messages:
+                                last_message_ids[channel_id] = max(msg.id for msg in messages)
                             
                     except Exception as e:
                         logger.warning(f"폴링 중 오류 (채널 {channel_id}): {e}")
