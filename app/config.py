@@ -19,6 +19,7 @@ class Settings:
     # 봇 설정
     bot_token: str
     personal_chat_id: str
+    important_bot_token: str
 
     openai_api_key: str
     openai_model: str
@@ -47,6 +48,7 @@ def load_settings() -> Settings:
     # 봇 설정
     bot_token = os.getenv("BOT_TOKEN", "")
     personal_chat_id = os.getenv("PERSONAL_CHAT_ID", "")
+    important_bot_token = os.getenv("IMPORTANT_BOT_TOKEN", "")
 
     openai_api_key = os.getenv("OPENAI_API_KEY", "")
     openai_model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
@@ -67,6 +69,7 @@ def load_settings() -> Settings:
         important_channel=important_channel,
         bot_token=bot_token,
         personal_chat_id=personal_chat_id,
+        important_bot_token=important_bot_token,
         openai_api_key=openai_api_key,
         openai_model=openai_model,
         upstage_api_key=upstage_api_key,

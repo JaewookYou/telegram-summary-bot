@@ -42,6 +42,12 @@ class ImageProcessor:
                 image.verify()
                 # 이미지를 다시 열기 (verify 후에는 닫힘)
                 image = Image.open(io.BytesIO(image_data))
+                
+                # 이미지 크기 확인 (너무 크면 리사이즈)
+                if image.size[0] > 2000 or image.size[1] > 2000:
+                    image.thumbnail((2000, 2000), Image.Resampling.LANCZOS)
+                    logger.info(f"이미지 리사이즈: {image.size}")
+                    
             except Exception as img_error:
                 logger.error(f"이미지 로드 실패: {img_error}")
                 return None

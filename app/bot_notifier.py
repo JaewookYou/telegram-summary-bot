@@ -22,10 +22,15 @@ class BotNotifier:
     def __init__(self, settings: Settings):
         self.bot_token = settings.bot_token
         self.personal_chat_id = settings.personal_chat_id
+        self.important_bot_token = settings.important_bot_token
         self.base_url = f"https://api.telegram.org/bot{self.bot_token}"
+        self.important_base_url = f"https://api.telegram.org/bot{self.important_bot_token}" if self.important_bot_token else None
         
         if not self.personal_chat_id:
             logger.warning("PERSONAL_CHAT_ID가 설정되지 않았습니다. 개인 알림 기능이 비활성화됩니다.")
+        
+        if not self.important_bot_token:
+            logger.warning("IMPORTANT_BOT_TOKEN이 설정되지 않았습니다. 중요 봇 알림 기능이 비활성화됩니다.")
     
     def send_personal_notification(self, message: str, disable_notification: bool = False) -> bool:
         """개인 DM으로 알림 메시지 전송"""
@@ -88,6 +93,38 @@ class BotNotifier:
                         
         except Exception as e:
             logger.error(f"❌ 개인 HTML 알림 전송 실패: {e}")
+            return False
+    
+    async def send_important_html(self, html_content: str, disable_notification: bool = False) -> bool:
+        """HTML 형식의 중요 봇 전송"""
+        if not self.important_bot_token or not self.important_base_url:
+            logger.warning("중요 봇 토큰이 설정되지 않아 중요 알림을 보낼 수 없습니다.")
+            return False
+        
+        try:
+            async with aiohttp.ClientSession() as session:
+                payload = {
+                    "chat_id": self.personal_chat_id,  # 같은 개인 chat_id로 전송
+                    "text": html_content,
+                    "parse_mode": "HTML",
+                    "disable_notification": disable_notification
+                }
+                
+                async with session.post(f"{self.important_base_url}/sendMessage", json=payload) as response:
+                    if response.status == 200:
+                        result = await response.json()
+                        if result.get("ok"):
+                            logger.info(f"✅ 중요 봇 HTML 알림 전송 성공: {self.personal_chat_id}")
+                            return True
+                        else:
+                            logger.error(f"❌ 중요 봇 API 오류: {result.get('description', 'Unknown error')}")
+                            return False
+                    else:
+                        logger.error(f"❌ 중요 봇 HTTP 오류: {response.status}")
+                        return False
+                        
+        except Exception as e:
+            logger.error(f"❌ 중요 봇 HTML 알림 전송 실패: {e}")
             return False
     
     async def get_updates(self) -> Optional[Dict[str, Any]]:

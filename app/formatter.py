@@ -50,7 +50,7 @@ def format_html(
     # 제목과 본문, 링크는 스타일 적용 전에 이스케이프 처리하여 준비
     title = escape(source_title)
     body = escape(summary)
-    link = escape(original_link)
+    original_link_escaped = escape(original_link)
 
     # 중요도별 스타일 적용
     if importance == "high":
@@ -103,8 +103,9 @@ def format_html(
     # 추출된 링크 목록 추가
     if extracted_links:
         html += f"<b>🔗 포함된 링크:</b>\n"
-        for i, link in enumerate(extracted_links, 1):
-            html += f"{i}. {escape(link)}\n"
+        for i, extracted_link in enumerate(extracted_links, 1):
+            # 링크를 클릭 가능한 형태로 표시
+            html += f"{i}. <a href=\"{extracted_link}\">{escape(extracted_link)}</a>\n"
     
     # 포워드 정보 추가
     if forward_info:
@@ -112,8 +113,8 @@ def format_html(
         original_channel = escape(forward_info.get("original_channel", "Unknown"))
         html += f"<b>📤 포워드:</b> {forward_channel} → {original_channel}\n"
     
-    if link:
-        html += f"<a href=\"{link}\">원문 열기</a>"
+    if original_link_escaped:
+        html += f"<a href=\"{original_link_escaped}\">원문 열기</a>"
     return html
 
 

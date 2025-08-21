@@ -22,16 +22,42 @@ class LinkProcessor:
     
     def extract_links_from_text(self, text: str) -> list[str]:
         """텍스트에서 링크 추출"""
-        # URL 패턴 매칭
-        url_pattern = r'https?://[^\s<>"]+|www\.[^\s<>"]+'
-        urls = re.findall(url_pattern, text)
+        # 더 포괄적인 URL 패턴 매칭
+        url_patterns = [
+            r'https?://[^\s<>"]+',  # http/https 링크
+            r'www\.[^\s<>"]+',      # www로 시작하는 링크
+            r't\.me/[^\s<>"]+',     # Telegram 링크
+            r'x\.com/[^\s<>"]+',    # X(Twitter) 링크
+            r'forms\.gle/[^\s<>"]+', # Google Forms 링크
+        ]
         
-        # www로 시작하는 URL을 https://로 변환
+        urls = []
+        for pattern in url_patterns:
+            found_urls = re.findall(pattern, text)
+            urls.extend(found_urls)
+        
+        # 중복 제거 및 정리
         processed_urls = []
+        seen_urls = set()
+        
         for url in urls:
+            # 링크 끝의 불필요한 문자 제거 (괄호, 마침표, 쉼표 등)
+            url = re.sub(r'[.,;!?)\]}>"\s]+$', '', url)
+            
+            # www로 시작하는 URL을 https://로 변환
             if url.startswith('www.'):
                 url = 'https://' + url
-            processed_urls.append(url)
+            elif url.startswith('t.me/') and not url.startswith('http'):
+                url = 'https://' + url
+            elif url.startswith('x.com/') and not url.startswith('http'):
+                url = 'https://' + url
+            elif url.startswith('forms.gle/') and not url.startswith('http'):
+                url = 'https://' + url
+            
+            # 중복 제거
+            if url not in seen_urls:
+                seen_urls.add(url)
+                processed_urls.append(url)
         
         return processed_urls
     

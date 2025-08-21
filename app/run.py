@@ -254,6 +254,11 @@ async def main() -> None:
         logger.info(f"✅ 봇 개인 알림 활성화: {bot_notifier.personal_chat_id}")
     else:
         logger.warning("⚠️ 봇 개인 알림 비활성화: PERSONAL_CHAT_ID 설정 필요")
+    
+    if bot_notifier.important_bot_token:
+        logger.info(f"✅ 중요 봇 알림 활성화: {bot_notifier.important_bot_token[:20]}...")
+    else:
+        logger.warning("⚠️ 중요 봇 알림 비활성화: IMPORTANT_BOT_TOKEN 설정 필요")
 
     logger.info(
         "Aggregator=%s, importance>=%s, dedup_window=%sm, similarity>=%s",
@@ -420,7 +425,7 @@ async def main() -> None:
         if has_text:
             links = link_processor.extract_links_from_text(message_text)
             if links:
-                mlog.info(f"링크 감지: {len(links)}개")
+                mlog.info(f"링크 감지: {len(links)}개 - {links}")
                 extracted_links = links  # 모든 링크 저장
                 for link in links[:2]:  # 최대 2개 링크만 처리
                     try:
@@ -588,6 +593,26 @@ async def main() -> None:
             should_forward = False
             mlog.info(f"❌ 무의미한 메시지 차단: {text[:50]}...")
         
+        # 내용 없는 요약 필터링
+        meaningless_summary_patterns = [
+            r'제공된 원문은 구체적인 내용이 부족하여 요약하기 어렵습니다',
+            r'추가적인 정보나 문맥이 필요합니다',
+            r'요약할 수 있는 구체적인 내용이 없습니다',
+            r'내용이 부족하여 요약하기 어렵습니다',
+            r'구체적인 정보가 부족합니다',
+            r'요약할 만한 내용이 없습니다',
+            r'추가 정보가 필요합니다',
+            r'문맥이 부족합니다',
+            r'구체적인 내용이 없습니다',
+            r'요약하기 어려운 내용입니다'
+        ]
+        
+        is_meaningless_summary = any(re.search(pattern, analysis.summary, re.IGNORECASE) for pattern in meaningless_summary_patterns)
+        
+        if is_meaningless_summary:
+            should_forward = False
+            mlog.info(f"❌ 내용 없는 요약 차단: {analysis.summary[:100]}...")
+        
         if not should_forward:
             # Store analysis but do not forward
             store.update_analysis(
@@ -637,9 +662,8 @@ async def main() -> None:
             await tg.send_html(settings.aggregator_channel, html)
             mlog.info(f"✅ 전송 성공: {meta.get('title','Unknown')} (chat_id={chat_id}, msg_id={message_id}) → {settings.aggregator_channel}")
             
-            # 돈버는 정보가 있거나 high 중요도인 경우 중요 채널로도 중복 전송
+            # high 중요도인 경우 중요 채널로도 중복 전송
             should_send_to_important = (
-                (analysis.money_making_info and analysis.money_making_info != "없음") or
                 analysis.importance == "high"
             )
             
@@ -652,12 +676,42 @@ async def main() -> None:
             
             # 봇 개인 알림 전송 (모든 전송된 메시지에 대해)
             try:
-                personal_notification = f"📢 <b>새 메시지 전송됨</b>\n\n채널: {meta.get('title', 'Unknown')}\n중요도: {analysis.importance}\n요약: {analysis.summary[:100]}..."
+                # 채널과 동일한 포매팅 사용
+                personal_html = format_html(
+                    source_title=source_title,
+                    summary=analysis.summary,
+                    importance=analysis.importance,
+                    categories=analysis.categories,
+                    tags=analysis.tags,
+                    money_making_info=analysis.money_making_info,
+                    action_guide=analysis.action_guide,
+                    original_link=orig_link,
+                    image_content=image_content,
+                    link_content=link_content,
+                    forward_info=forward_info,
+                    original_snippet=(raw_for_snippet[:400] + ("…" if len(raw_for_snippet) > 400 else "")) if raw_for_snippet else None,
+                    extracted_links=extracted_links,
+                )
                 
-                if await bot_notifier.send_personal_html(personal_notification):
+                if await bot_notifier.send_personal_html(personal_html):
                     mlog.info(f"📱 봇 개인 알림 전송 성공: {meta.get('title','Unknown')} (chat_id={chat_id}, msg_id={message_id})")
                 else:
                     mlog.warning(f"⚠️ 봇 개인 알림 전송 실패: {meta.get('title','Unknown')} (chat_id={chat_id}, msg_id={message_id})")
+                
+                # 중요 봇 알림 (medium 이상 + 돈버는 정보)
+                is_important = (
+                    analysis.importance in ["medium", "high"] or
+                    (analysis.money_making_info and analysis.money_making_info != "없음")
+                )
+                
+                if is_important and bot_notifier.important_bot_token:
+                    try:
+                        if await bot_notifier.send_important_html(personal_html):
+                            mlog.info(f"🔥 중요 봇 알림 전송 성공: {meta.get('title','Unknown')} (chat_id={chat_id}, msg_id={message_id})")
+                        else:
+                            mlog.warning(f"⚠️ 중요 봇 알림 전송 실패: {meta.get('title','Unknown')} (chat_id={chat_id}, msg_id={message_id})")
+                    except Exception as e:
+                        mlog.error(f"❌ 중요 봇 알림 전송 오류: {e}")
             except Exception as e:
                 mlog.error(f"❌ 봇 개인 알림 전송 오류: {e}")
             
@@ -734,17 +788,8 @@ async def main() -> None:
         forward_log = f" [FORWARD from {original_chat_id}:{original_message_id}]" if is_forward else ""
         mlog.info(f"✅ 메시지 처리 완료: {meta.get('title','Unknown')} (chat_id={chat_id}, msg_id={message_id}, importance={analysis.importance}){forward_log}")
 
-    # 모든 메시지를 받고 내부에서 필터링 (Telethon 이벤트 핸들러 제한 우회)
-    # 이벤트 핸들러를 더 명시적으로 등록
-    from telethon import events
-    
-    @tg.client.on(events.NewMessage)
-    async def new_message_handler(event):
-        logger.info(f"🔔 이벤트 핸들러 호출됨: chat_id={getattr(event, 'chat_id', 'unknown')}, msg_id={getattr(event.message, 'id', 'unknown')}")
-        await handle_message(event)
-    
-    # 추가 디버깅: 이벤트 핸들러가 등록되었는지 확인
-    logger.info(f"등록된 이벤트 핸들러 수: {len(tg.client.list_event_handlers())}")
+    # 폴링 방식만 사용 (이벤트 리스너 제거로 중복 처리 방지)
+    logger.info("폴링 방식만 사용하여 메시지 중복 처리 방지")
     
     # 채널 접근 권한 테스트
     async def test_channel_access():
@@ -851,7 +896,7 @@ async def main() -> None:
     
     # 연결 상태 확인
     logger.info(f"Telethon 연결 상태: {tg.client.is_connected()}")
-    logger.info(f"이벤트 핸들러 등록 완료 - 모든 메시지 수신 대기 중")
+    logger.info(f"폴링 방식 메시지 수신 대기 중")
     
     # 메시지 처리 통계 주기적 출력
     async def print_stats():
@@ -872,9 +917,6 @@ async def main() -> None:
                 
                 # 연결 상태 확인
                 logger.info(f"Telethon 연결 상태: {tg.client.is_connected()}")
-                
-                # 이벤트 핸들러 상태 확인
-                logger.info(f"등록된 이벤트 핸들러 수: {len(tg.client.list_event_handlers())}")
                 
                 # 캐시 상태 확인
                 logger.info(f"캐시 상태: 메타데이터 {len(channel_cache)}개, 엔티티 {len(entity_cache)}개")
