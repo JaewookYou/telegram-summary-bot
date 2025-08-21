@@ -39,6 +39,7 @@ def format_html(
     link_content: Optional[dict] = None,
     forward_info: Optional[dict] = None,
     original_snippet: Optional[str] = None,
+    extracted_links: Optional[List[str]] = None,
 ) -> str:
     imp_emoji = {
         "high": "🚨🔥",
@@ -46,6 +47,11 @@ def format_html(
         "low": "📝",
     }.get(importance, "📝")
     
+    # 제목과 본문, 링크는 스타일 적용 전에 이스케이프 처리하여 준비
+    title = escape(source_title)
+    body = escape(summary)
+    link = escape(original_link)
+
     # 중요도별 스타일 적용
     if importance == "high":
         title_style = f"<b>🚨🔥 {title}</b>"
@@ -59,9 +65,6 @@ def format_html(
 
     cats = ", ".join(categories) if categories else "-"
     tag_str = ", ".join(tags) if tags else "-"
-    title = escape(source_title)
-    body = escape(summary)
-    link = escape(original_link)
 
     html = (
         f"{title_style}\n"
@@ -96,6 +99,12 @@ def format_html(
         link_domain = escape(link_content.get("domain", ""))
         html += f"<b>🔗 링크:</b> {link_title}\n"
         html += f"<b>🌐 도메인:</b> {link_domain}\n"
+    
+    # 추출된 링크 목록 추가
+    if extracted_links:
+        html += f"<b>🔗 포함된 링크:</b>\n"
+        for i, link in enumerate(extracted_links, 1):
+            html += f"{i}. {escape(link)}\n"
     
     # 포워드 정보 추가
     if forward_info:

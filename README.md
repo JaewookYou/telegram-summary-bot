@@ -2,6 +2,8 @@
 
 여러 텔레그램 코인 채널의 메시지를 수집해 중복 제거, 중요도 분류, 태그 부여, 요약 후 개인 전용 채널로 가독성 좋게 재전송합니다. 각 메시지에는 원문으로 이동 가능한 링크가 포함됩니다.
 
+**🚀 최신 업데이트**: 임베딩 기반 중복 제거, 돈 버는 정보 분석, 안정성 대폭 개선
+
 ## 주요 기능
 - **LLM 분석**: 요약/중요도(low/medium/high)/카테고리/태그(JSON 응답)
 - **중복 제거**: Upstage.ai 임베딩 벡터 + 코사인 유사도 기준, 최근 N분 윈도우 내 의미적 중복 드랍
@@ -79,6 +81,13 @@ SOURCE_CHANNELS=@coinfeed,@defi_alpha,-1001234567890
 
 # 개인 채널 또는 'me' (Saved Messages)
 AGGREGATOR_CHANNEL=@my_private_feed
+
+# 중요 채널 (돈버는 정보 또는 high 중요도 메시지 중복 전송)
+IMPORTANT_CHANNEL=@arang_summary_important
+
+# 봇 설정 (개인 DM 알림용)
+BOT_TOKEN=your bot token
+PERSONAL_CHAT_ID=your_personal_chat_id_here
 
 OPENAI_API_KEY=sk-...
 OPENAI_MODEL=gpt-4o-mini

@@ -14,6 +14,11 @@ class Settings:
     telegram_session: str
     source_channels: List[str]
     aggregator_channel: str
+    important_channel: str
+    
+    # 봇 설정
+    bot_token: str
+    personal_chat_id: str
 
     openai_api_key: str
     openai_model: str
@@ -37,6 +42,11 @@ def load_settings() -> Settings:
     source_channels = [s.strip() for s in source_channels_raw.split(",") if s.strip()]
 
     aggregator_channel = os.getenv("AGGREGATOR_CHANNEL", "me").strip()
+    important_channel = os.getenv("IMPORTANT_CHANNEL", "@arang_summary_important").strip()
+
+    # 봇 설정
+    bot_token = os.getenv("BOT_TOKEN", "")
+    personal_chat_id = os.getenv("PERSONAL_CHAT_ID", "")
 
     openai_api_key = os.getenv("OPENAI_API_KEY", "")
     openai_model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
@@ -54,6 +64,9 @@ def load_settings() -> Settings:
         telegram_session=telegram_session,
         source_channels=source_channels,
         aggregator_channel=aggregator_channel,
+        important_channel=important_channel,
+        bot_token=bot_token,
+        personal_chat_id=personal_chat_id,
         openai_api_key=openai_api_key,
         openai_model=openai_model,
         upstage_api_key=upstage_api_key,

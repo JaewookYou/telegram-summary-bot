@@ -27,9 +27,25 @@ class ImageProcessor:
             logger.error("EasyOCR이 초기화되지 않음")
             return None
             
+        if not image_data:
+            logger.error("이미지 데이터가 비어있음")
+            return None
+            
         try:
-            # 이미지 로드
-            image = Image.open(io.BytesIO(image_data))
+            # 이미지 데이터를 BytesIO로 변환
+            image_bytes = io.BytesIO(image_data)
+            
+            # 이미지 로드 및 검증
+            try:
+                image = Image.open(image_bytes)
+                # 이미지가 실제로 로드되었는지 확인
+                image.verify()
+                # 이미지를 다시 열기 (verify 후에는 닫힘)
+                image = Image.open(io.BytesIO(image_data))
+            except Exception as img_error:
+                logger.error(f"이미지 로드 실패: {img_error}")
+                return None
+            
             logger.info(f"이미지 처리: {image.format}, {image.size}, {image.mode}")
             
             # EasyOCR로 텍스트 추출

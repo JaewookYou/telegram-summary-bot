@@ -29,6 +29,26 @@ class MessageRecord:
     original_link: str
 
 
+@dataclass
+class MoneyMessageRecord:
+    id: int
+    chat_id: int
+    message_id: int
+    date_ts: int
+    author: Optional[str]
+    original_text: str  # 원문 텍스트
+    forward_text: str   # 포워딩된 경우 포워딩 텍스트
+    money_making_info: str
+    action_guide: str
+    image_paths: str    # JSON 형태의 이미지 경로들
+    forward_info: str   # JSON 형태의 포워딩 정보
+    original_link: str
+    importance: str
+    categories: str
+    tags: str
+    summary: str
+
+
 class SQLiteStore:
     def __init__(self, db_path: str) -> None:
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
@@ -77,7 +97,36 @@ class SQLiteStore:
                 if 'action_guide' not in column_names:
                     logger.info("action_guide 컬럼 추가 중...")
                     c.execute("ALTER TABLE messages ADD COLUMN action_guide TEXT DEFAULT ''")
-            else:
+            
+            # money_messages 테이블 생성 (돈버는 정보 메시지 전용)
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS money_messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    chat_id INTEGER NOT NULL,
+                    message_id INTEGER NOT NULL,
+                    date_ts INTEGER NOT NULL,
+                    author TEXT,
+                    original_text TEXT NOT NULL,
+                    forward_text TEXT NOT NULL DEFAULT '',
+                    money_making_info TEXT NOT NULL,
+                    action_guide TEXT NOT NULL DEFAULT '',
+                    image_paths TEXT NOT NULL DEFAULT '[]',
+                    forward_info TEXT NOT NULL DEFAULT '{}',
+                    original_link TEXT NOT NULL DEFAULT '',
+                    importance TEXT NOT NULL,
+                    categories TEXT NOT NULL,
+                    tags TEXT NOT NULL,
+                    summary TEXT NOT NULL,
+                    UNIQUE(chat_id, message_id)
+                )
+            """)
+            
+            # money_messages 테이블 인덱스 생성
+            c.execute("CREATE INDEX IF NOT EXISTS idx_money_messages_date_ts ON money_messages(date_ts)")
+            c.execute("CREATE INDEX IF NOT EXISTS idx_money_messages_chat_id ON money_messages(chat_id)")
+            c.execute("CREATE INDEX IF NOT EXISTS idx_money_messages_importance ON money_messages(importance)")
+            
+            if not table_exists:
                 # 새 테이블 생성
                 c.execute("""
                     CREATE TABLE messages (
@@ -103,8 +152,6 @@ class SQLiteStore:
                 c.execute("CREATE INDEX idx_messages_importance ON messages(importance)")
             
             conn.commit()
-            
-            conn.commit()
 
     def insert_message(
         self,
@@ -124,10 +171,6 @@ class SQLiteStore:
         logger = logging.getLogger("app.storage")
         logger.debug(f"insert_message 호출: chat_id={chat_id} (타입: {type(chat_id)}), message_id={message_id} (타입: {type(message_id)})")
         logger.debug(f"chat_id 크기: {chat_id.bit_length()} bits, message_id 크기: {message_id.bit_length()} bits")
-        logger.debug(f"simhash_value 크기: {simhash_value.bit_length()} bits, 값: {simhash_value}")
-        
-        # simhash_value를 TEXT로 변환 (정확성 유지)
-        simhash_text = str(simhash_value)
         
         # SQLite INTEGER 범위 확인 (chat_id, message_id만)
         max_sqlite_int = 2**63 - 1
@@ -259,6 +302,110 @@ class SQLiteStore:
             """)
             rows = c.fetchall()
             return {row[0]: row[1] for row in rows}
+
+    def save_money_message(
+        self,
+        chat_id: int,
+        message_id: int,
+        date_ts: int,
+        author: Optional[str],
+        original_text: str,
+        forward_text: str,
+        money_making_info: str,
+        action_guide: str,
+        image_paths: list,
+        forward_info: dict,
+        original_link: str,
+        importance: str,
+        categories: str,
+        tags: str,
+        summary: str,
+    ) -> int:
+        """돈버는 정보가 있는 메시지를 별도 테이블에 저장"""
+        import json
+        
+        with self.connect() as conn:
+            c = conn.cursor()
+            try:
+                c.execute(
+                    """
+                    INSERT OR REPLACE INTO money_messages (
+                        chat_id, message_id, date_ts, author, original_text, forward_text,
+                        money_making_info, action_guide, image_paths, forward_info,
+                        original_link, importance, categories, tags, summary
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        chat_id,
+                        message_id,
+                        date_ts,
+                        author,
+                        original_text,
+                        forward_text,
+                        money_making_info,
+                        action_guide,
+                        json.dumps(image_paths),
+                        json.dumps(forward_info),
+                        original_link,
+                        importance,
+                        categories,
+                        tags,
+                        summary,
+                    ),
+                )
+                conn.commit()
+                logger.info(f"돈버는 정보 메시지 저장 성공: chat_id={chat_id}, message_id={message_id}")
+                return c.lastrowid
+            except Exception as e:
+                logger.error(f"돈버는 정보 메시지 저장 실패: chat_id={chat_id}, message_id={message_id}, 에러: {e}")
+                raise
+
+    def get_money_messages(self, limit: int = 100) -> list[MoneyMessageRecord]:
+        """저장된 돈버는 정보 메시지들을 조회"""
+        import json
+        
+        with self.connect() as conn:
+            c = conn.cursor()
+            c.execute(
+                """
+                SELECT id, chat_id, message_id, date_ts, author, original_text, forward_text,
+                       money_making_info, action_guide, image_paths, forward_info,
+                       original_link, importance, categories, tags, summary
+                FROM money_messages
+                ORDER BY date_ts DESC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+            rows = c.fetchall()
+            
+            records = []
+            for row in rows:
+                try:
+                    record = MoneyMessageRecord(
+                        id=row[0],
+                        chat_id=row[1],
+                        message_id=row[2],
+                        date_ts=row[3],
+                        author=row[4],
+                        original_text=row[5],
+                        forward_text=row[6],
+                        money_making_info=row[7],
+                        action_guide=row[8],
+                        image_paths=row[9],
+                        forward_info=row[10],
+                        original_link=row[11],
+                        importance=row[12],
+                        categories=row[13],
+                        tags=row[14],
+                        summary=row[15],
+                    )
+                    records.append(record)
+                except Exception as e:
+                    logger.warning(f"돈버는 정보 메시지 레코드 파싱 실패: {e}")
+                    continue
+                    
+            return records
 
     def get_recent_message_count(self, seconds: int) -> int:
         """최근 N초 내 메시지 개수를 반환"""

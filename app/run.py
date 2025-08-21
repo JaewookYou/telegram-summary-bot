@@ -15,6 +15,7 @@ from app.image_processor import ImageProcessor
 from app.link_processor import LinkProcessor
 from app.embedding_client import UpstageEmbeddingClient
 from app.sent_message_logger import SentMessageLogger
+from app.bot_notifier import BotNotifier
 
 import logging
 import sqlite3
@@ -132,6 +133,15 @@ async def main() -> None:
     image_processor = ImageProcessor()
     link_processor = LinkProcessor()
     sent_logger = SentMessageLogger()
+    
+    # Upstage.ai API 연결 테스트
+    logger.info("Upstage.ai API 연결 테스트 중...")
+    api_test_result = await embedding_client.test_connection()
+    if not api_test_result:
+        logger.error("Upstage.ai API 연결 실패. 임베딩 기반 중복 제거가 작동하지 않습니다.")
+        logger.error("API 키를 확인하거나 네트워크 연결을 점검하세요.")
+    else:
+        logger.info("Upstage.ai API 연결 성공")
     try:
         await tg.start()
     except sqlite3.OperationalError as e:
@@ -144,7 +154,18 @@ async def main() -> None:
             )
         raise
 
-    channel_cache: Dict[int, dict] = {}
+    channel_cache: Dict[int, dict] = {}  # 메타데이터 캐시
+    entity_cache: Dict[int, object] = {}  # Telethon 엔티티 캐시
+    
+    def clear_old_cache():
+        """오래된 캐시 정리 (메모리 관리)"""
+        if len(entity_cache) > 100:  # 100개 이상이면 오래된 것부터 정리
+            logger.info(f"캐시 정리: {len(entity_cache)}개 엔티티")
+            # 가장 오래된 20개 제거
+            keys_to_remove = list(entity_cache.keys())[:20]
+            for key in keys_to_remove:
+                del entity_cache[key]
+            logger.info(f"캐시 정리 완료: {len(entity_cache)}개 엔티티 남음")
 
     async def ensure_channel_meta(identifier: str) -> dict:
         meta = await tg.iter_channel_meta(identifier)
@@ -200,13 +221,22 @@ async def main() -> None:
             channel_cache[chat_id] = meta
             return meta
 
-    # Preload source channel metas
+    # Preload source channel metas and entities
     chat_filters = []
-    logger.info(f"=== 소스 채널 메타데이터 로딩 시작 ===")
+    logger.info(f"=== 소스 채널 메타데이터 및 엔티티 로딩 시작 ===")
     for src in settings.source_channels:
         logger.info(f"채널 로딩 중: {src}")
         meta = await ensure_channel_meta(src)
         channel_cache[meta["chat_id"]] = meta
+        
+        # 엔티티도 미리 로딩하여 캐시에 저장
+        try:
+            entity = await tg.client.get_entity(src)
+            entity_cache[meta["chat_id"]] = entity
+            logger.info(f"엔티티 캐시 저장: {meta['title']} (ID: {meta['chat_id']})")
+        except Exception as e:
+            logger.warning(f"엔티티 로딩 실패: {src}, 에러: {e}")
+        
         # 방송 채널 또는 메가그룹 모두 포함하도록 수정
         if not meta.get("is_broadcast", False) and not meta.get("is_megagroup", False):
             logger.info(f"제외(방송 채널/메가그룹 아님): {meta['title']} (@{meta['username'] or 'N/A'}) [ID: {meta['chat_id']}] megagroup={meta.get('is_megagroup')} broadcast={meta.get('is_broadcast')}")
@@ -217,6 +247,13 @@ async def main() -> None:
     
     logger.info(f"=== 모니터링 대상 채널 ID 목록 ===")
     logger.info(f"총 {len(chat_filters)}개 채널: {chat_filters}")
+
+    # 봇 알림 기능 초기화
+    bot_notifier = BotNotifier(settings)
+    if bot_notifier.personal_chat_id:
+        logger.info(f"✅ 봇 개인 알림 활성화: {bot_notifier.personal_chat_id}")
+    else:
+        logger.warning("⚠️ 봇 개인 알림 비활성화: PERSONAL_CHAT_ID 설정 필요")
 
     logger.info(
         "Aggregator=%s, importance>=%s, dedup_window=%sm, similarity>=%s",
@@ -340,14 +377,19 @@ async def main() -> None:
             mlog.warning(f"❌ 메시지 버림: 포워드 메시지이지만 원본 채널 ID를 추출할 수 없음 (chat_id={chat_id}, msg_id={msg.id})")
             return
         
-        # 기본 텍스트 설정
+        # 기본 텍스트 설정 (None 처리 추가)
         if is_forward and original_text:
-            text = original_text.strip()
-            raw_for_snippet = original_text
+            text = original_text.strip() if original_text else ""
+            raw_for_snippet = original_text or ""
             mlog.info(f"Forward 메시지 감지: 원본 chat_id={original_chat_id}, msg_id={original_message_id}")
         else:
-            text = message_text.strip()
-            raw_for_snippet = message_text
+            text = message_text.strip() if message_text else ""
+            raw_for_snippet = message_text or ""
+        
+        # 텍스트가 비어있는 경우 처리
+        if not text:
+            mlog.warning(f"❌ 메시지 버림: 텍스트가 비어있음 (chat_id={chat_id}, msg_id={msg.id})")
+            return
         
         # 이미지 처리
         image_content = None
@@ -374,10 +416,12 @@ async def main() -> None:
         
         # 링크 처리
         link_content = None
+        extracted_links = []
         if has_text:
             links = link_processor.extract_links_from_text(message_text)
             if links:
                 mlog.info(f"링크 감지: {len(links)}개")
+                extracted_links = links  # 모든 링크 저장
                 for link in links[:2]:  # 최대 2개 링크만 처리
                     try:
                         webpage_data = await link_processor.fetch_webpage_content(link)
@@ -404,10 +448,11 @@ async def main() -> None:
         # 임베딩 생성 및 중복 제거
         embedding = await embedding_client.get_embedding(text)
         if not embedding:
-            mlog.warning(f"임베딩 생성 실패, 메시지 처리 중단: chat_id={chat_id}, msg_id={msg.id}")
-            return
-        
-        embedding_json = json.dumps(embedding)
+            mlog.warning(f"임베딩 생성 실패, 중복 제거 없이 처리 계속: chat_id={chat_id}, msg_id={msg.id}")
+            # 임베딩 실패 시에도 메시지 처리를 계속하되, 중복 제거는 건너뜀
+            embedding_json = "[]"  # 빈 임베딩으로 설정
+        else:
+            embedding_json = json.dumps(embedding)
         now_ts = int(datetime.utcnow().timestamp())
         since_ts = now_ts - settings.dedup_recent_minutes * 60
         
@@ -415,11 +460,15 @@ async def main() -> None:
         check_message_id = original_message_id if is_forward and original_message_id else msg.id
         check_chat_id = original_chat_id if is_forward and original_chat_id else chat_id
         
-        similar = store.find_recent_similar(embedding_json, since_ts, settings.dedup_similarity_threshold, embedding_client)
-        if similar:
-            similar_chat_id, similar_msg_id, similarity_score = similar
-            mlog.info(f"❌ 메시지 버림: 중복 메시지 (현재: chat_id={chat_id}, msg_id={msg.id}, 체크: chat_id={check_chat_id}, msg_id={check_message_id}) - 유사도 점수: {similarity_score:.3f}, 임계값: {settings.dedup_similarity_threshold}")
-            return  # duplicate
+        # 임베딩이 있는 경우에만 중복 제거 수행
+        if embedding_json != "[]":
+            similar = store.find_recent_similar(embedding_json, since_ts, settings.dedup_similarity_threshold, embedding_client)
+            if similar:
+                similar_chat_id, similar_msg_id, similarity_score = similar
+                mlog.info(f"❌ 메시지 버림: 중복 메시지 (현재: chat_id={chat_id}, msg_id={msg.id}, 체크: chat_id={check_chat_id}, msg_id={check_message_id}) - 유사도 점수: {similarity_score:.3f}, 임계값: {settings.dedup_similarity_threshold}")
+                return  # duplicate
+        else:
+            mlog.info(f"임베딩 없음, 중복 제거 건너뜀: chat_id={chat_id}, msg_id={msg.id}")
 
         # Insert preliminary record
         # Forward된 메시지인 경우 원본 정보 사용, 아니면 현재 메시지 정보 사용
@@ -548,6 +597,8 @@ async def main() -> None:
                 categories=",".join(analysis.categories),
                 tags=",".join(analysis.tags),
                 summary=analysis.summary,
+                money_making_info=analysis.money_making_info,
+                action_guide=analysis.action_guide,
                 original_link=orig_link,
             )
             mlog.info(f"❌ 메시지 버림: 중요도 부족 (chat_id={chat_id}, msg_id={message_id}, importance={analysis.importance} < {settings.important_threshold}, 텍스트 길이: {len(text)}자)")
@@ -579,10 +630,36 @@ async def main() -> None:
             link_content=link_content,
             forward_info=forward_info,
             original_snippet=(raw_for_snippet[:400] + ("…" if len(raw_for_snippet) > 400 else "")) if raw_for_snippet else None,
+            extracted_links=extracted_links,
         )
         try:
+            # 기본 채널로 전송
             await tg.send_html(settings.aggregator_channel, html)
             mlog.info(f"✅ 전송 성공: {meta.get('title','Unknown')} (chat_id={chat_id}, msg_id={message_id}) → {settings.aggregator_channel}")
+            
+            # 돈버는 정보가 있거나 high 중요도인 경우 중요 채널로도 중복 전송
+            should_send_to_important = (
+                (analysis.money_making_info and analysis.money_making_info != "없음") or
+                analysis.importance == "high"
+            )
+            
+            if should_send_to_important:
+                try:
+                    await tg.send_html(settings.important_channel, html)
+                    mlog.info(f"🔥 중요 채널 전송 성공: {meta.get('title','Unknown')} (chat_id={chat_id}, msg_id={message_id}) → {settings.important_channel}")
+                except Exception as e:
+                    mlog.error(f"❌ 중요 채널 전송 실패: {meta.get('title','Unknown')} (chat_id={chat_id}, msg_id={message_id}) → {settings.important_channel} - {e}")
+            
+            # 봇 개인 알림 전송 (모든 전송된 메시지에 대해)
+            try:
+                personal_notification = f"📢 <b>새 메시지 전송됨</b>\n\n채널: {meta.get('title', 'Unknown')}\n중요도: {analysis.importance}\n요약: {analysis.summary[:100]}..."
+                
+                if await bot_notifier.send_personal_html(personal_notification):
+                    mlog.info(f"📱 봇 개인 알림 전송 성공: {meta.get('title','Unknown')} (chat_id={chat_id}, msg_id={message_id})")
+                else:
+                    mlog.warning(f"⚠️ 봇 개인 알림 전송 실패: {meta.get('title','Unknown')} (chat_id={chat_id}, msg_id={message_id})")
+            except Exception as e:
+                mlog.error(f"❌ 봇 개인 알림 전송 오류: {e}")
             
             # 전송된 메시지 로깅
             sent_logger.log_sent_message(
@@ -618,6 +695,42 @@ async def main() -> None:
             action_guide=analysis.action_guide,
             original_link=orig_link,
         )
+        
+        # 돈버는 정보가 있는 메시지는 별도 저장
+        if analysis.money_making_info and analysis.money_making_info != "없음":
+            try:
+                # 이미지 경로 수집
+                image_paths = []
+                if has_media and image_content:
+                    for img in image_content:
+                        if 'path' in img:
+                            image_paths.append(img['path'])
+                
+                # 포워딩 텍스트 준비
+                forward_text = ""
+                if is_forward and forward_info:
+                    forward_text = forward_info.get('text', '')
+                
+                store.save_money_message(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    date_ts=now_ts,
+                    author=author,
+                    original_text=raw_for_snippet,
+                    forward_text=forward_text,
+                    money_making_info=analysis.money_making_info,
+                    action_guide=analysis.action_guide,
+                    image_paths=image_paths,
+                    forward_info=forward_info or {},
+                    original_link=orig_link,
+                    importance=analysis.importance,
+                    categories=",".join(analysis.categories),
+                    tags=",".join(analysis.tags),
+                    summary=analysis.summary,
+                )
+                mlog.info(f"💰 돈버는 정보 메시지 별도 저장: {meta.get('title','Unknown')} (chat_id={chat_id}, msg_id={message_id})")
+            except Exception as e:
+                mlog.error(f"❌ 돈버는 정보 메시지 저장 실패: {meta.get('title','Unknown')} (chat_id={chat_id}, msg_id={message_id}) - {e}")
         forward_log = f" [FORWARD from {original_chat_id}:{original_message_id}]" if is_forward else ""
         mlog.info(f"✅ 메시지 처리 완료: {meta.get('title','Unknown')} (chat_id={chat_id}, msg_id={message_id}, importance={analysis.importance}){forward_log}")
 
@@ -640,17 +753,19 @@ async def main() -> None:
             try:
                 # 채널 정보 가져오기 시도
                 chat = await tg.client.get_entity(channel_id)
-                logger.info(f"✅ 채널 접근 가능: {chat.title} (ID: {channel_id})")
+                # 안전한 채널 제목 접근
+                channel_title = getattr(chat, 'title', f'Channel {channel_id}')
+                logger.info(f"✅ 채널 접근 가능: {channel_title} (ID: {channel_id})")
                 
                 # 최근 메시지 가져오기 시도 (권한 확인)
                 try:
                     messages = await tg.client.get_messages(chat, limit=1)
                     if messages:
-                        logger.info(f"✅ 메시지 읽기 권한 있음: {chat.title} (최근 메시지 ID: {messages[0].id})")
+                        logger.info(f"✅ 메시지 읽기 권한 있음: {channel_title} (최근 메시지 ID: {messages[0].id})")
                     else:
-                        logger.info(f"⚠️ 메시지 없음: {chat.title}")
+                        logger.info(f"⚠️ 메시지 없음: {channel_title}")
                 except Exception as e:
-                    logger.warning(f"❌ 메시지 읽기 권한 없음: {chat.title} - {e}")
+                    logger.warning(f"❌ 메시지 읽기 권한 없음: {channel_title} - {e}")
                     
             except Exception as e:
                 logger.error(f"❌ 채널 접근 불가: ID {channel_id} - {e}")
@@ -669,8 +784,16 @@ async def main() -> None:
             try:
                 for channel_id in chat_filters:
                     try:
-                        # 채널 정보 가져오기
-                        chat = await tg.client.get_entity(channel_id)
+                        # 채널 정보 가져오기 (엔티티 캐시 활용)
+                        chat = entity_cache.get(channel_id)
+                        if not chat:
+                            # 엔티티 캐시에 없으면 새로 가져오기
+                            chat = await tg.client.get_entity(channel_id)
+                            if not chat:
+                                logger.warning(f"채널 정보를 가져올 수 없음: {channel_id}")
+                                continue
+                            # 엔티티 캐시에 저장
+                            entity_cache[channel_id] = chat
                         
                         # 최근 메시지 가져오기 (최대 10개)
                         messages = await tg.client.get_messages(chat, limit=10)
@@ -684,7 +807,9 @@ async def main() -> None:
                         
                         # 새로운 메시지가 있는지 확인
                         if latest_msg_id > last_known_id:
-                            logger.info(f"🔍 폴링으로 새 메시지 발견: {chat.title} (ID: {latest_msg_id})")
+                            # 안전한 채널 제목 접근
+                            channel_title = getattr(chat, 'title', f'Channel {channel_id}')
+                            logger.info(f"🔍 폴링으로 새 메시지 발견: {channel_title} (ID: {latest_msg_id})")
                             
                             # 새로운 메시지들 처리
                             for msg in reversed(messages):
@@ -700,15 +825,17 @@ async def main() -> None:
                                         
                                         event = EventWrapper(msg, channel_id)
                                         await handle_message(event)
-                                        logger.info(f"✅ 폴링 메시지 처리 완료: {chat.title} (ID: {msg.id})")
+                                        logger.info(f"✅ 폴링 메시지 처리 완료: {channel_title} (ID: {msg.id})")
                                     except Exception as e:
-                                        logger.error(f"❌ 폴링 메시지 처리 실패: {chat.title} (ID: {msg.id}) - {e}")
+                                        logger.error(f"❌ 폴링 메시지 처리 실패: {channel_title} (ID: {msg.id}) - {e}")
                             
                             # 마지막 메시지 ID 업데이트
                             last_message_ids[channel_id] = latest_msg_id
                             
                     except Exception as e:
                         logger.warning(f"폴링 중 오류 (채널 {channel_id}): {e}")
+                        # 채널 접근 실패 시 일정 시간 대기
+                        await asyncio.sleep(5)
                 
                 # 30초 대기
                 await asyncio.sleep(30)
@@ -748,6 +875,12 @@ async def main() -> None:
                 
                 # 이벤트 핸들러 상태 확인
                 logger.info(f"등록된 이벤트 핸들러 수: {len(tg.client.list_event_handlers())}")
+                
+                # 캐시 상태 확인
+                logger.info(f"캐시 상태: 메타데이터 {len(channel_cache)}개, 엔티티 {len(entity_cache)}개")
+                
+                # 캐시 정리
+                clear_old_cache()
                 
             except Exception as e:
                 logger.error(f"통계 출력 실패: {e}")
