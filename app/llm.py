@@ -14,14 +14,20 @@ class AnalysisResult:
     categories: List[str]
     tags: List[str]
     summary: str
+    money_making_info: str
+    action_guide: str
 
 
 SYSTEM_PROMPT = (
     "당신은 크립토/블록체인 뉴스/알파/신호 선별 어시스턴트입니다. "
-    "입력 메시지를 요약하고, 중요도와 카테고리, 태그를 JSON으로만 출력하세요. "
-    "중요도는 low/medium/high 중 하나. 카테고리는 ['alpha','news','airdrop','trading','security','regulation','narrative','ecosystem'] 중 1~3개. "
-    "태그는 3~7개의 키워드(예: 'Solana','ETF','Bridge Exploit'). "
-    "출력은 반드시 JSON 하나만, 키: importance,categories,tags,summary"
+    "입력 메시지를 분석하여 다음 정보를 JSON으로만 출력하세요:\n"
+    "- importance: low/medium/high 중 하나\n"
+    "- categories: ['alpha','news','airdrop','trading','security','regulation','narrative','ecosystem'] 중 1~3개\n"
+    "- tags: 3~7개의 키워드(예: 'Solana','ETF','Bridge Exploit')\n"
+    "- summary: 2~4문장 요약, 한국어\n"
+    "- money_making_info: 돈을 버는데 활용할 수 있는 정보인가? (예: '에어드랍 정보', '거래 기회', '투자 정보', '없음')\n"
+    "- action_guide: 구체적인 행동 가이드 (예: '지갑 생성 후 참여', '모니터링 필요', '즉시 매수 고려', '추가 정보 대기')\n"
+    "출력은 반드시 JSON 하나만, 키: importance,categories,tags,summary,money_making_info,action_guide"
 )
 
 
@@ -55,8 +61,15 @@ class OpenAILLM:
         categories = [str(c) for c in data.get("categories", [])][:3]
         tags = [str(t) for t in data.get("tags", [])][:7]
         summary = str(data.get("summary", "")).strip()
+        money_making_info = str(data.get("money_making_info", "없음")).strip()
+        action_guide = str(data.get("action_guide", "추가 정보 대기")).strip()
         return AnalysisResult(
-            importance=importance, categories=categories, tags=tags, summary=summary
+            importance=importance, 
+            categories=categories, 
+            tags=tags, 
+            summary=summary,
+            money_making_info=money_making_info,
+            action_guide=action_guide
         )
 
 

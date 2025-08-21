@@ -32,15 +32,30 @@ def format_html(
     importance: str,
     categories: List[str],
     tags: List[str],
+    money_making_info: str,
+    action_guide: str,
     original_link: str,
     image_content: Optional[dict] = None,
     link_content: Optional[dict] = None,
+    forward_info: Optional[dict] = None,
+    original_snippet: Optional[str] = None,
 ) -> str:
     imp_emoji = {
-        "high": "🔥",
+        "high": "🚨🔥",
         "medium": "⚡",
         "low": "📝",
     }.get(importance, "📝")
+    
+    # 중요도별 스타일 적용
+    if importance == "high":
+        title_style = f"<b>🚨🔥 {title}</b>"
+        body_style = f"<blockquote><b>{body}</b></blockquote>"
+    elif importance == "medium":
+        title_style = f"<b>⚡ {title}</b>"
+        body_style = f"<blockquote>{body}</blockquote>"
+    else:
+        title_style = f"<b>📝 {title}</b>"
+        body_style = f"<blockquote>{body}</blockquote>"
 
     cats = ", ".join(categories) if categories else "-"
     tag_str = ", ".join(tags) if tags else "-"
@@ -49,11 +64,26 @@ def format_html(
     link = escape(original_link)
 
     html = (
-        f"<b>{imp_emoji} {title}</b>\n"
-        f"<blockquote>{body}</blockquote>\n"
+        f"{title_style}\n"
+        f"{body_style}\n"
+    )
+
+    # 원문 일부 추가(요청 사항)
+    if original_snippet:
+        snippet = escape(original_snippet)
+        html += f"<b>원문 일부:</b>\n<blockquote>{snippet}</blockquote>\n"
+
+    html += (
         f"<b>Categories:</b> {cats}\n"
         f"<b>Tags:</b> {tag_str}\n"
     )
+    
+    # 돈 버는 정보와 행동 가이드 추가
+    if money_making_info and money_making_info != "없음":
+        money_info = escape(money_making_info)
+        action = escape(action_guide)
+        html += f"<b>💰 돈 버는 정보:</b> {money_info}\n"
+        html += f"<b>🎯 행동 가이드:</b> {action}\n"
     
     # 이미지 정보 추가
     if image_content:
@@ -66,6 +96,12 @@ def format_html(
         link_domain = escape(link_content.get("domain", ""))
         html += f"<b>🔗 링크:</b> {link_title}\n"
         html += f"<b>🌐 도메인:</b> {link_domain}\n"
+    
+    # 포워드 정보 추가
+    if forward_info:
+        forward_channel = escape(forward_info.get("forward_channel", "Unknown"))
+        original_channel = escape(forward_info.get("original_channel", "Unknown"))
+        html += f"<b>📤 포워드:</b> {forward_channel} → {original_channel}\n"
     
     if link:
         html += f"<a href=\"{link}\">원문 열기</a>"

@@ -40,7 +40,7 @@ class LinkProcessor:
         try:
             # 비동기로 requests 실행
             response = await asyncio.get_event_loop().run_in_executor(
-                None, self.session.get, url, 10  # 10초 타임아웃
+                None, lambda: self.session.get(url, timeout=10)  # 10초 타임아웃
             )
             response.raise_for_status()
             

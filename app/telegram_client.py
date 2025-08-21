@@ -14,6 +14,8 @@ class ChannelMeta:
     username: Optional[str]
     internal_id: Optional[int]
     is_public: bool
+    is_megagroup: bool
+    is_broadcast: bool
 
 
 class TG:
@@ -36,6 +38,10 @@ class TG:
         # Use peer_id (-100... for channels/supergroups) to make event filters match
         peer_id = utils.get_peer_id(entity)
 
+        # Type flags
+        is_megagroup = bool(getattr(entity, "megagroup", False))
+        is_broadcast = bool(getattr(entity, "broadcast", not is_megagroup))
+
         # For private channel links: internal id is abs(peer_id) without leading 100
         internal_id = None
         if isinstance(peer_id, int):
@@ -44,7 +50,15 @@ class TG:
             if s.startswith("100"):
                 internal_id = int(s[3:])
 
-        return ChannelMeta(chat_id=peer_id, title=title, username=username, internal_id=internal_id, is_public=is_public)
+        return ChannelMeta(
+            chat_id=peer_id,
+            title=title,
+            username=username,
+            internal_id=internal_id,
+            is_public=is_public,
+            is_megagroup=is_megagroup,
+            is_broadcast=is_broadcast,
+        )
 
     async def send_html(self, target: str | int, html: str) -> Message:
         return await self.client.send_message(target, html, parse_mode="html", link_preview=False)

@@ -14,6 +14,21 @@ ACTION_TERMS = re.compile(
     re.IGNORECASE,
 )
 
+# 중요 링크 패턴 추가
+IMPORTANT_LINK_PATTERNS = [
+    # 이벤트/폼 링크
+    r"(forms\.google\.com|docs\.google\.com/forms)",
+    r"(naver\.com/.*form|naver\.me/.*form)",
+    r"(kakao\.com/.*form|kakao\.me/.*form)",
+    # 오픈채팅방 맽크
+    r"(open\.kakao\.com|kakao\.com/openchat)",
+    # 기타 중요 링크
+    r"(airdrop|whitelist|presale|ico|ido)",
+    r"(event|launch|listing|announcement)",
+]
+
+IMPORTANT_LINK_REGEX = re.compile("|".join(IMPORTANT_LINK_PATTERNS), re.IGNORECASE)
+
 
 def boost_importance_for_events(text: str, current_importance: str) -> Tuple[str, List[str], List[str]]:
     """
@@ -22,12 +37,18 @@ def boost_importance_for_events(text: str, current_importance: str) -> Tuple[str
     """
     has_event = EVENT_TERMS.search(text) is not None
     has_action = ACTION_TERMS.search(text) is not None
+    has_important_link = IMPORTANT_LINK_REGEX.search(text) is not None
 
     importance_order = {"low": 0, "medium": 1, "high": 2}
     cur = importance_order.get(current_importance, 0)
     new = cur
 
-    if has_event and has_action:
+    # 중요 링크가 있으면 무조건 high로 부스팅
+    if has_important_link:
+        new = max(new, importance_order["high"])
+    
+    # 이벤트 + 액션 키워드가 있으면 high로 부스팅
+    elif has_event and has_action:
         new = max(new, importance_order["high"])  # strong boost
     elif has_event:
         new = max(new, importance_order["medium"])  # mild boost
@@ -35,8 +56,16 @@ def boost_importance_for_events(text: str, current_importance: str) -> Tuple[str
     inv = {v: k for k, v in importance_order.items()}
     new_importance = inv.get(new, current_importance)
 
-    extra_categories: List[str] = ["event"] if has_event else []
-    extra_tags: List[str] = ["giveaway"] if has_event else []
+    extra_categories: List[str] = []
+    extra_tags: List[str] = []
+    
+    if has_event:
+        extra_categories.append("event")
+        extra_tags.append("giveaway")
+    
+    if has_important_link:
+        extra_categories.append("important_link")
+        extra_tags.append("form_event")
 
     return new_importance, extra_categories, extra_tags
 

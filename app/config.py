@@ -17,9 +17,10 @@ class Settings:
 
     openai_api_key: str
     openai_model: str
+    upstage_api_key: str
 
     important_threshold: str
-    dedup_hamming_threshold: int
+    dedup_similarity_threshold: float
     dedup_recent_minutes: int
 
     sqlite_path: str
@@ -39,9 +40,10 @@ def load_settings() -> Settings:
 
     openai_api_key = os.getenv("OPENAI_API_KEY", "")
     openai_model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    upstage_api_key = os.getenv("UPSTAGE_API_KEY", "")
 
     important_threshold = os.getenv("IMPORTANT_THRESHOLD", "low").lower()
-    dedup_hamming_threshold = int(os.getenv("DEDUP_HAMMING_THRESHOLD", "9"))
+    dedup_similarity_threshold = float(os.getenv("DEDUP_SIMILARITY_THRESHOLD", "0.85"))
     dedup_recent_minutes = int(os.getenv("DEDUP_RECENT_MINUTES", "360"))
 
     sqlite_path = os.getenv("SQLITE_PATH", "data/db.sqlite3")
@@ -54,8 +56,9 @@ def load_settings() -> Settings:
         aggregator_channel=aggregator_channel,
         openai_api_key=openai_api_key,
         openai_model=openai_model,
+        upstage_api_key=upstage_api_key,
         important_threshold=important_threshold,
-        dedup_hamming_threshold=dedup_hamming_threshold,
+        dedup_similarity_threshold=dedup_similarity_threshold,
         dedup_recent_minutes=dedup_recent_minutes,
         sqlite_path=sqlite_path,
     )
