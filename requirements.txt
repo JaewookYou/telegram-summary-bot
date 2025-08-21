@@ -1,8 +1,12 @@
-telethon==1.36.0
-openai>=1.37.0
+telethon==1.40.0
+openai==1.58.1
 python-dotenv==1.0.1
 simhash==2.1.2
 pydantic==2.8.2
 tenacity==8.5.0
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+Pillow>=10.0.0
+easyocr>=1.7.0
 
 

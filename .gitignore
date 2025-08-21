@@ -44,3 +44,7 @@ dist/
 build/
 .eggs/
 
+# Development tools and tests
+tests/
+tools/
+

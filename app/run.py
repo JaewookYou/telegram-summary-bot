@@ -12,6 +12,8 @@ from app.storage import SQLiteStore
 from app.telegram_client import TG
 from app.logging_utils import setup_logging
 from app.rules import boost_importance_for_events
+from app.image_processor import ImageProcessor
+from app.link_processor import LinkProcessor
 
 import logging
 import sqlite3
@@ -35,6 +37,11 @@ def extract_forward_info(msg) -> Tuple[bool, Optional[int], Optional[int], Optio
         original_message_id = None
         original_text = None
         
+        # Forward 객체 정보 로깅 (디버깅용)
+        mlog = logging.getLogger("app.msg")
+        mlog.info(f"Forward 객체 타입: {type(msg.forward)}")
+        mlog.info(f"Forward 객체 속성: {[attr for attr in dir(msg.forward) if not attr.startswith('_')]}")
+        
         # 원본 채널/채팅 정보 추출
         if hasattr(msg.forward, 'chat_id'):
             original_chat_id = msg.forward.chat_id
@@ -42,14 +49,26 @@ def extract_forward_info(msg) -> Tuple[bool, Optional[int], Optional[int], Optio
             original_chat_id = msg.forward.channel_id
         elif hasattr(msg.forward, 'user_id'):
             original_chat_id = msg.forward.user_id
+        elif hasattr(msg.forward, 'from_id'):
+            # MessageFwdHeader의 경우
+            from_id = msg.forward.from_id
+            if hasattr(from_id, 'channel_id'):
+                original_chat_id = from_id.channel_id
+            elif hasattr(from_id, 'user_id'):
+                original_chat_id = from_id.user_id
+            elif hasattr(from_id, 'chat_id'):
+                original_chat_id = from_id.chat_id
             
         # 원본 메시지 ID 추출
         if hasattr(msg.forward, 'id'):
             original_message_id = msg.forward.id
+        elif hasattr(msg.forward, 'channel_post'):
+            original_message_id = msg.forward.channel_post
             
         # 원본 텍스트는 현재 메시지의 텍스트 사용 (forward 시 텍스트가 복사됨)
         original_text = getattr(msg, 'message', '')
         
+        mlog.info(f"Forward 감지됨 - chat_id={original_chat_id}, msg_id={original_message_id}")
         return True, original_chat_id, original_message_id, original_text
     
     return False, None, None, None
@@ -74,6 +93,10 @@ async def main() -> None:
         raise RuntimeError("OPENAI_API_KEY가 필요합니다. .env를 설정하세요.")
     llm = OpenAILLM(settings.openai_api_key, settings.openai_model)
     tg = TG(settings.telegram_session, settings.telegram_api_id, settings.telegram_api_hash)
+    
+    # 이미지 및 링크 처리기 초기화
+    image_processor = ImageProcessor()
+    link_processor = LinkProcessor()
     try:
         await tg.start()
     except sqlite3.OperationalError as e:
@@ -97,6 +120,48 @@ async def main() -> None:
             "internal_id": meta.internal_id,
             "is_public": meta.is_public,
         }
+
+    async def get_channel_meta(chat_id: int) -> dict:
+        """채널 메타데이터를 가져오거나 캐시에서 찾기"""
+        if chat_id in channel_cache:
+            return channel_cache[chat_id]
+        
+        try:
+            # 채널 엔티티를 직접 가져와서 메타데이터 생성
+            entity = await tg.client.get_entity(chat_id)
+            meta = {
+                "chat_id": chat_id,
+                "title": getattr(entity, "title", f"Channel {chat_id}"),
+                "username": getattr(entity, "username", None),
+                "internal_id": None,
+                "is_public": bool(getattr(entity, "username", None)),
+            }
+            
+            # 비공개 채널의 경우 internal_id 계산
+            if not meta["is_public"]:
+                from telethon import utils
+                peer_id = utils.get_peer_id(entity)
+                if isinstance(peer_id, int):
+                    peer_abs = abs(peer_id)
+                    s = str(peer_abs)
+                    if s.startswith("100"):
+                        meta["internal_id"] = int(s[3:])
+            
+            channel_cache[chat_id] = meta
+            logger.info(f"채널 메타데이터 캐시 저장: {meta}")
+            return meta
+        except Exception as e:
+            logger.warning(f"채널 메타데이터 가져오기 실패 (chat_id={chat_id}): {e}")
+            # 기본 메타데이터 반환
+            meta = {
+                "chat_id": chat_id,
+                "title": f"Unknown Channel {chat_id}",
+                "username": None,
+                "internal_id": None,
+                "is_public": False,
+            }
+            channel_cache[chat_id] = meta
+            return meta
 
     # Preload source channel metas
     chat_filters = []
@@ -124,24 +189,82 @@ async def main() -> None:
             mlog.warning("Missing chat_id on event; dropping")
             return
 
-        # Log non-text messages as well
-        if not getattr(msg, "message", "").strip():
+        # 채널 필터링: chat_id가 -100으로 시작하는 경우만 채널
+        if not str(chat_id).startswith("-100"):
+            mlog.info(f"채팅방 메시지 무시: chat_id={chat_id} (채널만 모니터링)")
+            return
+
+        # 소스 채널 필터링: 설정된 채널만 처리
+        if chat_id not in chat_filters:
             meta = channel_cache.get(chat_id) or {}
-            mlog.info(
-                f"수신 메시지(비텍스트): {meta.get('title','Unknown')} ({meta.get('username') or chat_id}) "
-                f"msg_id={msg.id}"
-            )
+            mlog.info(f"미모니터링 채널 메시지: {meta.get('title', 'Unknown')} (chat_id={chat_id})")
+            return
+
+        # 메시지 내용 분석
+        message_text = getattr(msg, "message", "").strip()
+        has_text = bool(message_text)
+        has_media = bool(msg.media)
+        
+        # 모든 수신 메시지 로깅 (INFO 레벨)
+        meta = channel_cache.get(chat_id) or {}
+        mlog.info(
+            f"수신 메시지: {meta.get('title','Unknown')} ({meta.get('username') or chat_id}) "
+            f"msg_id={msg.id}, len={len(message_text)} | {message_text[:50]}{'...' if len(message_text) > 50 else ''}"
+        )
+        
+        # 텍스트가 없고 미디어도 없는 경우 무시
+        if not has_text and not has_media:
+            mlog.info(f"빈 메시지 무시: chat_id={chat_id}, msg_id={msg.id}")
             return
 
         # Forward 메시지 확인 및 원본 정보 추출
         is_forward, original_chat_id, original_message_id, original_text = extract_forward_info(msg)
         
-        # Forward된 메시지인 경우 원본 텍스트 사용, 아니면 현재 텍스트 사용
+        # 기본 텍스트 설정
         if is_forward and original_text:
             text = normalize_text(original_text)
             mlog.info(f"Forward 메시지 감지: 원본 chat_id={original_chat_id}, msg_id={original_message_id}")
         else:
-            text = normalize_text(msg.message)
+            text = normalize_text(message_text)
+        
+        # 이미지 처리
+        image_content = None
+        if has_media and msg.media:
+            try:
+                # 이미지 다운로드
+                image_data = await tg.client.download_media(msg.media, bytes)
+                if image_data:
+                    # OCR로 텍스트 추출
+                    extracted_text = await image_processor.extract_text_from_image(image_data)
+                    if extracted_text:
+                        image_content = image_processor.analyze_image_content(extracted_text)
+                        # 이미지에서 추출한 텍스트를 메인 텍스트에 추가
+                        text = f"{text} [이미지 텍스트: {extracted_text}]" if text else f"[이미지 텍스트: {extracted_text}]"
+                        mlog.info(f"이미지에서 텍스트 추출: {len(extracted_text)}자")
+                    else:
+                        image_content = image_processor.analyze_image_content("")
+                        mlog.info("이미지에서 텍스트 추출 실패")
+            except Exception as e:
+                mlog.error(f"이미지 처리 실패: {e}")
+        
+        # 링크 처리
+        link_content = None
+        if has_text:
+            links = link_processor.extract_links_from_text(message_text)
+            if links:
+                mlog.info(f"링크 감지: {len(links)}개")
+                for link in links[:2]:  # 최대 2개 링크만 처리
+                    try:
+                        webpage_data = await link_processor.fetch_webpage_content(link)
+                        if webpage_data:
+                            link_content = link_processor.analyze_link_content(webpage_data)
+                            # 링크 내용을 메인 텍스트에 추가
+                            link_summary = link_content.get("summary", "")
+                            text = f"{text} [링크 내용: {link_summary}]" if text else f"[링크 내용: {link_summary}]"
+                            mlog.info(f"링크 내용 분석 완료: {link_content.get('title', '')[:50]}")
+                            break  # 첫 번째 링크만 처리
+                    except Exception as e:
+                        mlog.error(f"링크 처리 실패 ({link}): {e}")
         
         meta = channel_cache.get(chat_id) or {}
         snippet = text[:200] + ("…" if len(text) > 200 else "")
@@ -169,8 +292,12 @@ async def main() -> None:
             return  # duplicate
 
         # Insert preliminary record
-        message_id = msg.id
+        # Forward된 메시지인 경우 원본 정보 사용, 아니면 현재 메시지 정보 사용
+        message_id = original_message_id if is_forward and original_message_id else msg.id
         author = None
+        
+        mlog.debug(f"저장할 메시지 정보: chat_id={chat_id}, message_id={message_id}, is_forward={is_forward}")
+        
         store.insert_message(
             chat_id=chat_id,
             message_id=message_id,
@@ -205,31 +332,11 @@ async def main() -> None:
 
         # Forward된 메시지의 경우 원본 링크 생성
         if is_forward and original_chat_id and original_message_id:
-            # 원본 채널 메타데이터 가져오기 (캐시에서 찾거나 새로 생성)
-            original_meta = channel_cache.get(original_chat_id)
-            if not original_meta:
-                try:
-                    # 원본 채널 정보를 가져와서 캐시에 저장
-                    original_entity = await tg.client.get_entity(original_chat_id)
-                    original_meta = {
-                        "title": getattr(original_entity, "title", f"Channel {original_chat_id}"),
-                        "username": getattr(original_entity, "username", None),
-                        "is_public": bool(getattr(original_entity, "username", None)),
-                        "internal_id": None
-                    }
-                    if not original_meta["is_public"]:
-                        # 비공개 채널의 경우 internal_id 계산
-                        from telethon import utils
-                        peer_id = utils.get_peer_id(original_entity)
-                        if isinstance(peer_id, int):
-                            peer_abs = abs(peer_id)
-                            s = str(peer_abs)
-                            if s.startswith("100"):
-                                original_meta["internal_id"] = int(s[3:])
-                    channel_cache[original_chat_id] = original_meta
-                except Exception as e:
-                    mlog.warning(f"원본 채널 정보 가져오기 실패: {e}")
-                    original_meta = {"title": f"Unknown Channel {original_chat_id}", "username": None, "is_public": False, "internal_id": None}
+            mlog.info(f"Forward 메시지 원본 링크 생성: chat_id={original_chat_id}, msg_id={original_message_id}")
+            
+            # 원본 채널 메타데이터 가져오기
+            original_meta = await get_channel_meta(original_chat_id)
+            mlog.info(f"원본 채널 메타데이터: {original_meta}")
             
             # 원본 메시지 링크 생성
             orig_link = build_original_link(
@@ -240,9 +347,15 @@ async def main() -> None:
                 internal_id=original_meta.get("internal_id"),
             )
             source_title = original_meta.get("title", f"Unknown Channel {original_chat_id}")
+            mlog.info(f"원본 링크 생성 결과: {orig_link}")
         else:
             # 일반 메시지의 경우 현재 채널 링크 사용
-            meta = channel_cache.get(chat_id) or {}
+            mlog.info(f"일반 메시지 링크 생성: chat_id={chat_id}, msg_id={message_id}")
+            
+            # 현재 채널 메타데이터 가져오기
+            meta = await get_channel_meta(chat_id)
+            mlog.info(f"현재 채널 메타데이터: {meta}")
+            
             orig_link = build_original_link(
                 chat_id=chat_id,
                 message_id=message_id,
@@ -251,11 +364,15 @@ async def main() -> None:
                 internal_id=meta.get("internal_id"),
             )
             source_title = meta.get("title", "Unknown")
+            mlog.info(f"일반 링크 생성 결과: {orig_link}")
 
         # Importance thresholding
-        if IMPORTANCE_ORDER.get(analysis.importance, 0) < IMPORTANCE_ORDER.get(
-            settings.important_threshold, 1
-        ):
+        importance_order = IMPORTANCE_ORDER.get(analysis.importance, 0)
+        threshold_order = IMPORTANCE_ORDER.get(settings.important_threshold, 1)
+        
+        mlog.info(f"중요도 판단: {analysis.importance} (순서: {importance_order}) vs 임계값: {settings.important_threshold} (순서: {threshold_order})")
+        
+        if importance_order < threshold_order:
             # Store analysis but do not forward
             store.update_analysis(
                 chat_id=chat_id,
@@ -266,10 +383,12 @@ async def main() -> None:
                 summary=analysis.summary,
                 original_link=orig_link,
             )
-            mlog.info(f"Stored low-priority analysis (chat_id={chat_id}, msg_id={message_id}, importance={analysis.importance})")
+            mlog.info(f"❌ 전달 제외: 중요도 부족 (chat_id={chat_id}, msg_id={message_id}, importance={analysis.importance} < {settings.important_threshold})")
             return
 
         # Forward to aggregator channel
+        mlog.info(f"✅ 전달 승인: 중요도 충족 (chat_id={chat_id}, msg_id={message_id}, importance={analysis.importance} >= {settings.important_threshold})")
+        
         html = format_html(
             source_title=source_title,
             summary=analysis.summary,
@@ -277,6 +396,8 @@ async def main() -> None:
             categories=analysis.categories,
             tags=analysis.tags,
             original_link=orig_link,
+            image_content=image_content,
+            link_content=link_content,
         )
         try:
             await tg.send_html(settings.aggregator_channel, html)

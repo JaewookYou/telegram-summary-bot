@@ -8,7 +8,7 @@ from logging.handlers import RotatingFileHandler
 def setup_logging(
     *,
     log_dir: str = "logs",
-    log_level: str = "INFO",
+    log_level: str = "INFO",  # INFO로 변경하여 DEBUG 출력 제거
     log_file: str = "app.log",
     error_log_file: str = "error.log",
 ) -> None:

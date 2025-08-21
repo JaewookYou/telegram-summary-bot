@@ -12,6 +12,36 @@
 - 로깅: 콘솔 + 회전 파일 로그 `logs/app.log`, 에러 전용 `logs/error.log`
 - 룰 기반 중요도 부스팅: 이벤트/추첨/에어드랍/기프티콘/커피 등 키워드 포함 시 중요도 상향(참여 유도까지 있으면 high)
 
+## 프로젝트 구조
+```
+telegram-summary-bot/
+├── app/                    # 메인 애플리케이션 코드
+│   ├── __main__.py        # 실행 진입점
+│   ├── run.py             # 메인 런루프
+│   ├── telegram_client.py # Telegram 클라이언트
+│   ├── llm.py             # OpenAI LLM 분석
+│   ├── dedup.py           # 중복 제거 (SimHash)
+│   ├── formatter.py       # HTML 메시지 포맷
+│   ├── storage.py         # SQLite 저장소
+│   ├── config.py          # 설정 관리
+│   ├── logging_utils.py   # 로깅 설정
+│   ├── rules.py           # 중요도 부스팅 룰
+│   ├── image_processor.py # 이미지 OCR 처리
+│   └── link_processor.py  # 링크 웹 스크래핑
+├── tests/                 # 테스트 파일들
+│   ├── test_forward.py    # Forward 메시지 테스트
+│   ├── test_forward_debug.py # Forward 디버깅
+│   └── test_media_processing.py # 미디어 처리 테스트
+├── tools/                 # 유틸리티 도구들
+│   ├── migrate_db.py      # 데이터베이스 마이그레이션
+│   └── ocr_comparison.md  # OCR 라이브러리 비교 문서
+├── data/                  # 데이터베이스 및 백업
+├── logs/                  # 로그 파일들
+├── requirements.txt       # Python 의존성
+├── README.md             # 프로젝트 문서
+└── .env                  # 환경 변수 (git 제외)
+```
+
 ## 구성 요소
 - 수집: Telethon(Userbot) `events.NewMessage` + 소스 채널 필터
 - 분석: `app/llm.py` OpenAI Chat Completions(JSON 강제)
