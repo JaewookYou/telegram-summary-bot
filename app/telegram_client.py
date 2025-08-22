@@ -143,7 +143,7 @@ class TG:
         )
 
     async def send_html(self, target: str | int, html: str) -> Message:
-        return await self.client.send_message(target, html, parse_mode="html", link_preview=False)
+        return await self.client.send_message(target, html, parse_mode="html", link_preview=True)
 
     async def get_chat_permissions(self, chat_id: str) -> dict:
         """Bot API를 통해 채팅 권한 정보를 가져옵니다."""

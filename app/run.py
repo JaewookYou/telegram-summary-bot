@@ -546,6 +546,14 @@ async def main() -> None:
         
         # 포워드된 메시지의 경우 원본 채널이 모니터링 대상인지 확인
         if is_forward and original_chat_id:
+            # 0) 원본 메시지 (original_chat_id, original_message_id)가 이미 처리되었는지 먼저 확인하여 중복 전송 방지
+            try:
+                if original_message_id and store.is_message_processed(original_chat_id, original_message_id):
+                    mlog.info(f"⏭️ 포워드 중복 건너뜀: 원본 이미 처리됨 (orig_chat_id={original_chat_id}, orig_msg_id={original_message_id})")
+                    return
+            except Exception as e:
+                mlog.warning(f"원본 처리 여부 확인 실패: {e}")
+
             # 포워드한 채널 정보 가져오기
             forward_channel_meta = await get_channel_meta(numeric_chat_id)
             original_channel_meta = await get_channel_meta(original_chat_id)
@@ -1220,6 +1228,28 @@ async def main() -> None:
                                 continue
                             # 엔티티 캐시에 저장
                             entity_cache[channel_id] = chat
+                        
+                        # 동적 추가된 채널 초기화: last_message_ids에 없으면 최신 ID 스냅샷 후 그 이후만 처리
+                        if channel_id not in last_message_ids:
+                            try:
+                                db_last_id = store.get_channel_last_message_id(channel_id)
+                            except Exception as e:
+                                logger.warning(f"채널 {channel_id} 마지막 ID DB 조회 실패: {e}")
+                                db_last_id = None
+
+                            if isinstance(db_last_id, int) and db_last_id >= 0:
+                                last_message_ids[channel_id] = db_last_id
+                            else:
+                                latest_id = 0
+                                try:
+                                    snap = await tg.client.get_messages(chat, limit=1)
+                                    if snap:
+                                        latest_id = snap[0].id
+                                except Exception as e:
+                                    logger.warning(f"채널 {channel_id} 최신 ID 스냅샷 실패: {e}")
+                                last_message_ids[channel_id] = latest_id
+                                store.update_channel_last_message_id(channel_id, latest_id)
+                                logger.info(f"채널 {channel_id} 최신 메시지 ID 초기화(동적 추가): {latest_id}")
                         
                         # 마지막 처리된 메시지 ID 이후의 메시지만 가져오기
                         last_known_id = last_message_ids.get(channel_id, 0)
