@@ -1,5 +1,9 @@
 # telegram-summary-bot
 
+## 채널
+- 중요도 높음·이벤트/에어드랍 알림: [@arang_summary_important](https://t.me/arang_summary_important)
+- 모든 메시지 스트림: [@arang_summary](https://t.me/arang_summary)
+
 여러 텔레그램 코인 채널의 메시지를 수집해 중복 제거, 중요도 분류, 태그 부여, 요약 후 개인 전용 채널로 가독성 좋게 재전송합니다. 각 메시지에는 원문으로 이동 가능한 링크가 포함됩니다.
 
 **🚀 최신 업데이트**: 최초/재시작 시 각 채널의 최신 메시지 ID 스냅샷 후 그 이후만 분석(백필 없음), SOURCE_CHANNELS 동적 반영 시 @username → 숫자 peer id 정규화, channel_last_message_ids datatype mismatch 해결, Bot API 권한 기반 순수 방송 채널만 모니터링, 제거된 채널 중복 로딩 방지, 메시지 작성시간 포함
@@ -68,25 +72,10 @@ telegram-summary-bot/
 └── .env                  # 환경 변수 (git 제외)
 ```
 
-## 구성 요소
-- **수집**: 폴링 방식 메시지 수신 (30초 간격)
-  - `chat_filters`에는 순수 방송 채널의 peer_id만 포함 (채팅 기능이 있는 채널/그룹 제외)
-  - Bot API 권한 기반으로 정확한 채널 타입 판별 (`can_send_messages`, `join_to_send_messages`)
-  - 실시간 이벤트 핸들러 제한을 우회하여 안정적인 메시지 수신
-  - 데이터베이스 기반 메시지 처리 상태 추적으로 재시작 시 중복 처리 방지
-  - 포워딩된 메시지의 원본 채널 자동 추가 및 SOURCE_CHANNELS 동적 최신화
-  - 제거된 채널 목록을 메모리에 유지하여 중복 로딩 방지
-  - @username 형태의 chat_id를 정확한 숫자 ID로 변환하여 처리
-- **분석**: `app/llm.py` OpenAI Chat Completions(JSON 강제)
-- **중복**: `app/embedding_client.py` Upstage.ai 임베딩 벡터 + 코사인 유사도 + 텍스트 해시 기반 정확한 중복 제거
-- **포맷**: `app/formatter.py` HTML 메시지 빌드(요약+원문 스니펫+원문 링크+포함된 링크+이벤트 상품 정보)
-- **저장**: `app/storage.py` SQLite 스키마/CRUD (money_messages 테이블 포함)
-- **로깅**: `app/logging_utils.py`(콘솔+파일, 회전, 메시지 전용 로그)
-- **룰**: `app/rules.py`(이벤트/에어드랍 중요도 부스팅)
-- **이미지**: `app/image_processor.py`(OCR 텍스트 추출, 안정성 강화)
-- **링크**: `app/link_processor.py`(Playwright 기반 웹페이지 콘텐츠 분석)
-- **봇 알림**: `app/bot_notifier.py`(Telegram Bot API를 통한 개인 DM 알림)
-- **돈버는 정보**: `app/money_message_processor.py`(돈버는 정보 메시지 관리 유틸리티)
+## 구성 요소(핵심)
+- **수집**: 폴링(30s), 순수 방송 채널만 모니터링, 동적 채널 추가 시 최신 ID 스냅샷
+- **중복 제거**: 텍스트 해시 + 임베딩 유사도(Upstage.ai)
+- **분석/전송**: OpenAI 분석 → 요약/분류 후 개인 채널로 전송(원문 링크 포함)
 - **채널 관리**: `app/config.py`(remove_source_channel 함수로 .env 파일 자동 수정)
 
 ## 설치

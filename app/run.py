@@ -447,13 +447,12 @@ async def main() -> None:
                     mlog.info(f"❌ 메시지 버림: 채널 댓글 스레드 메시지 (chat_id={chat_id}, msg_id={msg.id}, thread_id={message_thread_id})")
                     return
             
-            # 일반 댓글/스레드 무시 로직
-            if is_comment and not has_top_thread:
-                mlog.info(f"❌ 메시지 버림: 댓글 메시지 (chat_id={chat_id}, msg_id={msg.id})")
-                return
-            elif has_top_thread:
+            # 일반 답글은 처리, 토픽 스레드만 무시
+            if has_top_thread:
                 mlog.info(f"❌ 메시지 버림: 토픽 스레드 메시지 (chat_id={chat_id}, msg_id={msg.id})")
                 return
+            if is_comment:
+                mlog.info(f"↪️ 답글 메시지 처리: (chat_id={chat_id}, msg_id={msg.id})")
                 
         except Exception as e:
             mlog.warning(f"채널 댓글 스레드 감지 중 오류: {e}")
@@ -966,7 +965,7 @@ async def main() -> None:
             
             # high 중요도인 경우 중요 채널로도 중복 전송
             should_send_to_important = (
-                analysis.importance == "high" or analysis.importance == "medium"
+                analysis.importance == "high"
             )
             
             if should_send_to_important:
@@ -1003,7 +1002,7 @@ async def main() -> None:
                 
                 # 중요 봇 알림 (medium 이상 + 돈버는 정보)
                 is_important = (
-                    analysis.importance in ["medium", "high"]
+                    analysis.importance in ["high"]
                 )
                 
                 if is_important and bot_notifier.important_bot_token:
