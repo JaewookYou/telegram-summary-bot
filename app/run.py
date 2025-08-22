@@ -4,7 +4,7 @@ import asyncio
 from datetime import datetime, timedelta
 from typing import Dict, Optional, Tuple
 
-from app.config import load_settings
+from app.config import load_settings, load_source_channels, add_source_channel, remove_source_channel
 from app.formatter import build_original_link, format_html
 from app.llm import OpenAILLM
 from app.storage import SQLiteStore
@@ -22,9 +22,18 @@ import sqlite3
 import os
 import re
 import json
+from telethon import utils
 
 
 IMPORTANCE_ORDER = {"low": 0, "medium": 1, "high": 2}
+
+
+def format_time(timestamp):
+    """시간 정보를 표준화된 형태로 포맷팅"""
+    if timestamp:
+        dt = datetime.fromtimestamp(timestamp.timestamp())
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+    return None
 
 
 def extract_forward_info(msg) -> Tuple[bool, Optional[int], Optional[int], Optional[str]]:
@@ -68,16 +77,25 @@ def extract_forward_info(msg) -> Tuple[bool, Optional[int], Optional[int], Optio
 			mlog.info(f"from_id 타입: {type(from_id)}")
 			mlog.info(f"from_id 속성: {[attr for attr in dir(from_id) if not attr.startswith('_')]}")
 			try:
-				original_chat_id = _tg_utils.get_peer_id(from_id)
-				mlog.info(f"utils.get_peer_id(from_id) → {original_chat_id}")
+				# from_id가 유효한 peer 객체인지 확인하고 타입 체크 (Channel, User, Chat 등 허용)
+				if (hasattr(from_id, 'channel_id') or hasattr(from_id, 'user_id') or hasattr(from_id, 'chat_id')) and not isinstance(from_id, str) and hasattr(from_id, '__class__'):
+					original_chat_id = _tg_utils.get_peer_id(from_id)
+					mlog.info(f"utils.get_peer_id(from_id) → {original_chat_id}")
+				else:
+					mlog.info(f"유효하지 않은 from_id 타입: {type(from_id)}, 클래스: {getattr(from_id, '__class__', 'Unknown')}")
 			except Exception as e:
 				mlog.info(f"from_id peer 변환 실패: {e}")
 		
 		# Saved-from 경로 (메시지 링크로 저장된 경우)
 		if original_chat_id is None and hasattr(fwd, 'saved_from_peer') and getattr(fwd, 'saved_from_peer') is not None:
 			try:
-				original_chat_id = _tg_utils.get_peer_id(fwd.saved_from_peer)
-				mlog.info(f"saved_from_peer → {original_chat_id}")
+				# saved_from_peer도 타입 체크 (Channel, User, Chat 등 허용)
+				if (not isinstance(fwd.saved_from_peer, str) and 
+					hasattr(fwd.saved_from_peer, '__class__')):
+					original_chat_id = _tg_utils.get_peer_id(fwd.saved_from_peer)
+					mlog.info(f"saved_from_peer → {original_chat_id}")
+				else:
+					mlog.info(f"유효하지 않은 saved_from_peer 타입: {type(fwd.saved_from_peer)}, 클래스: {getattr(fwd.saved_from_peer, '__class__', 'Unknown')}")
 			except Exception as e:
 				mlog.info(f"saved_from_peer 변환 실패: {e}")
 		
@@ -126,7 +144,7 @@ async def main() -> None:
         raise RuntimeError("UPSTAGE_API_KEY가 필요합니다. .env를 설정하세요.")
     
     llm = OpenAILLM(settings.openai_api_key, settings.openai_model)
-    tg = TG(settings.telegram_session, settings.telegram_api_id, settings.telegram_api_hash)
+    tg = TG(settings.telegram_session, settings.telegram_api_id, settings.telegram_api_hash, settings.bot_token)
     
     # 임베딩, 이미지, 링크 처리기 초기화
     embedding_client = UpstageEmbeddingClient(settings.upstage_api_key)
@@ -168,16 +186,60 @@ async def main() -> None:
             logger.info(f"캐시 정리 완료: {len(entity_cache)}개 엔티티 남음")
 
     async def ensure_channel_meta(identifier: str) -> dict:
-        meta = await tg.iter_channel_meta(identifier)
-        return {
-            "chat_id": meta.chat_id,
-            "title": meta.title,
-            "username": meta.username,
-            "internal_id": meta.internal_id,
-            "is_public": meta.is_public,
-            "is_megagroup": getattr(meta, "is_megagroup", False),
-            "is_broadcast": getattr(meta, "is_broadcast", not getattr(meta, "is_megagroup", False)),
-        }
+        try:
+            meta = await tg.iter_channel_meta(identifier)
+            return {
+                "chat_id": meta.chat_id,
+                "title": meta.title,
+                "username": meta.username,
+                "internal_id": meta.internal_id,
+                "is_public": meta.is_public,
+                "chat_type": getattr(meta, "chat_type", "unknown"),
+                "is_forum": getattr(meta, "is_forum", False),
+                "linked_chat_id": getattr(meta, "linked_chat_id", None),
+                "has_chat": getattr(meta, "has_chat", False),
+                "is_megagroup": getattr(meta, "is_megagroup", False),
+                "is_broadcast": getattr(meta, "is_broadcast", not getattr(meta, "is_megagroup", False)),
+            }
+        except ValueError as e:
+            # 채널을 찾을 수 없는 경우 (삭제되었거나 접근 권한 없음)
+            logger.error(f"채널을 찾을 수 없음: {identifier}, 에러: {e}")
+            # 해당 채널을 SOURCE_CHANNELS에서 제거
+            if remove_source_channel(identifier):
+                logger.info(f"채널 {identifier}을 SOURCE_CHANNELS에서 제거했습니다.")
+            else:
+                logger.warning(f"채널 {identifier} 제거 실패")
+            
+            # 기본 메타데이터 반환 (에러 방지용)
+            return {
+                "chat_id": identifier,
+                "title": f"Deleted/Inaccessible Channel {identifier}",
+                "username": None,
+                "internal_id": None,
+                "is_public": False,
+                "chat_type": "unknown",
+                "is_forum": False,
+                "linked_chat_id": None,
+                "has_chat": False,
+                "is_megagroup": False,
+                "is_broadcast": False,
+            }
+        except Exception as e:
+            # 기타 예외 처리
+            logger.error(f"채널 메타데이터 가져오기 실패: {identifier}, 에러: {e}")
+            return {
+                "chat_id": identifier,
+                "title": f"Error Channel {identifier}",
+                "username": None,
+                "internal_id": None,
+                "is_public": False,
+                "chat_type": "unknown",
+                "is_forum": False,
+                "linked_chat_id": None,
+                "has_chat": False,
+                "is_megagroup": False,
+                "is_broadcast": False,
+            }
 
     async def get_channel_meta(chat_id: int) -> dict:
         """채널 메타데이터를 가져오거나 캐시에서 찾기"""
@@ -198,12 +260,18 @@ async def main() -> None:
             # 비공개 채널의 경우 internal_id 계산
             if not meta["is_public"]:
                 from telethon import utils
-                peer_id = utils.get_peer_id(entity)
-                if isinstance(peer_id, int):
-                    peer_abs = abs(peer_id)
-                    s = str(peer_abs)
-                    if s.startswith("100"):
-                        meta["internal_id"] = int(s[3:])
+                # entity가 유효한 Peer 객체인지 확인 (Channel, User, Chat 등 허용)
+                if (hasattr(entity, 'id') and 
+                    not isinstance(entity, str) and 
+                    hasattr(entity, '__class__')):
+                    peer_id = utils.get_peer_id(entity)
+                    if isinstance(peer_id, int):
+                        peer_abs = abs(peer_id)
+                        s = str(peer_abs)
+                        if s.startswith("100"):
+                            meta["internal_id"] = int(s[3:])
+                else:
+                    logger.warning(f"유효하지 않은 엔티티 타입으로 internal_id 계산 건너뜀: {type(entity)}")
             
             channel_cache[chat_id] = meta
             logger.info(f"채널 메타데이터 캐시 저장: {meta}")
@@ -223,27 +291,86 @@ async def main() -> None:
 
     # Preload source channel metas and entities
     chat_filters = []
+    removed_channels = set()  # 제거된 채널 목록을 메모리에 유지
     logger.info(f"=== 소스 채널 메타데이터 및 엔티티 로딩 시작 ===")
-    for src in settings.source_channels:
+    
+    # 동적으로 SOURCE_CHANNELS 로드
+    source_channels = load_source_channels()
+    logger.info(f"로드된 SOURCE_CHANNELS: {source_channels}")
+    
+    channels_to_remove = []  # 제거할 채널 목록
+    
+    for src in source_channels:
         logger.info(f"채널 로딩 중: {src}")
-        meta = await ensure_channel_meta(src)
-        channel_cache[meta["chat_id"]] = meta
-        
-        # 엔티티도 미리 로딩하여 캐시에 저장
         try:
-            entity = await tg.client.get_entity(src)
-            entity_cache[meta["chat_id"]] = entity
-            logger.info(f"엔티티 캐시 저장: {meta['title']} (ID: {meta['chat_id']})")
+            meta = await ensure_channel_meta(src)
+            channel_cache[meta["chat_id"]] = meta
+            
+            # 삭제되었거나 접근할 수 없는 채널인지 확인
+            if "Deleted/Inaccessible" in meta.get("title", "") or "Error" in meta.get("title", ""):
+                logger.warning(f"🚫 삭제되었거나 접근할 수 없는 채널 건너뜀: {src}")
+                continue
+            
+            # 엔티티도 미리 로딩하여 캐시에 저장
+            try:
+                entity = await tg.client.get_entity(src)
+                entity_cache[meta["chat_id"]] = entity
+                logger.info(f"엔티티 캐시 저장: {meta['title']} (ID: {meta['chat_id']})")
+            except Exception as e:
+                logger.warning(f"엔티티 로딩 실패: {src}, 에러: {e}")
         except Exception as e:
-            logger.warning(f"엔티티 로딩 실패: {src}, 에러: {e}")
-        
-        # 방송 채널 또는 메가그룹 모두 포함하도록 수정
-        if not meta.get("is_broadcast", False) and not meta.get("is_megagroup", False):
-            logger.info(f"제외(방송 채널/메가그룹 아님): {meta['title']} (@{meta['username'] or 'N/A'}) [ID: {meta['chat_id']}] megagroup={meta.get('is_megagroup')} broadcast={meta.get('is_broadcast')}")
+            logger.error(f"채널 로딩 중 예외 발생: {src}, 에러: {e}")
             continue
-        chat_filters.append(meta["chat_id"])  # 방송 채널과 메가그룹 모두 포함
-        channel_type = "broadcast" if meta.get("is_broadcast") else "megagroup"
-        logger.info(f"Listening source: {meta['title']} (@{meta['username'] or 'N/A'}) [ID: {meta['chat_id']}] ({channel_type})")
+        
+        # 채팅 기능 유무에 따른 필터링 (채팅 기능이 있으면 제거, 없으면 추가)
+        has_chat = meta.get("has_chat", False)
+        chat_type = meta.get("chat_type", "unknown")
+        
+        if has_chat:
+            # 채팅 기능이 있는 경우 제거 (사람들이 대화할 수 있음)
+            chat_type_info = f" ({chat_type})"
+            if chat_type == "supergroup" and meta.get("is_forum", False):
+                chat_type_info += " (토픽 기능 활성)"
+            
+            # Bot API 권한 정보 로깅
+            permission_info = ""
+            if meta.get("username"):
+                bot_permissions = await tg.get_chat_permissions(f"@{meta['username']}")
+                if bot_permissions:
+                    can_send = bot_permissions.get("can_send_messages", False)
+                    join_to_send = bot_permissions.get("join_to_send_messages", False)
+                    permission_info = f" [Bot API: can_send={can_send}, join_to_send={join_to_send}]"
+            
+            logger.warning(f"🚫 채팅 기능 있음 제거: {meta['title']} (@{meta['username'] or 'N/A'}) [ID: {meta['chat_id']}]{chat_type_info}{permission_info} - 사람들이 대화할 수 있으므로 SOURCE_CHANNELS에서 제거")
+            channels_to_remove.append(src)
+            removed_channels.add(src)  # 제거된 채널 목록에 추가
+            continue
+        else:
+            # 채팅 기능이 없는 경우 추가 (순수 방송 채널)
+            chat_filters.append(meta["chat_id"])
+            
+            # 연결된 채널/그룹 정보 로깅
+            linked_info = ""
+            if meta.get("linked_chat_id"):
+                linked_info = f" (연결된 채널/그룹: {meta['linked_chat_id']})"
+            
+            # Bot API 권한 정보 로깅
+            permission_info = ""
+            if meta.get("username"):
+                bot_permissions = await tg.get_chat_permissions(f"@{meta['username']}")
+                if bot_permissions:
+                    can_send = bot_permissions.get("can_send_messages", False)
+                    join_to_send = bot_permissions.get("join_to_send_messages", False)
+                    permission_info = f" [Bot API: can_send={can_send}, join_to_send={join_to_send}]"
+            
+            logger.info(f"✅ 순수 방송 채널 추가: {meta['title']} (@{meta['username'] or 'N/A'}) [ID: {meta['chat_id']}] ({chat_type}){linked_info}{permission_info}")
+    
+    # 그룹들을 SOURCE_CHANNELS에서 제거
+    for channel_to_remove in channels_to_remove:
+        if remove_source_channel(channel_to_remove):
+            logger.info(f"✅ .env에서 제거 완료: {channel_to_remove}")
+        else:
+            logger.error(f"❌ .env에서 제거 실패: {channel_to_remove}")
     
     logger.info(f"=== 모니터링 대상 채널 ID 목록 ===")
     logger.info(f"총 {len(chat_filters)}개 채널: {chat_filters}")
@@ -281,62 +408,112 @@ async def main() -> None:
             mlog.warning("❌ 메시지 버림: chat_id 없음")
             return
 
-        # 이미 처리된 메시지인지 확인
-        if store.is_message_processed(chat_id, msg.id):
-            mlog.info(f"⏭️ 메시지 건너뜀: 이미 처리된 메시지 (chat_id={chat_id}, msg_id={msg.id})")
+        # numeric_chat_id가 정의되지 않은 경우 안전하게 처리
+        if 'numeric_chat_id' not in locals():
+            mlog.warning(f"numeric_chat_id가 정의되지 않음, chat_id 사용: {chat_id}")
+            numeric_chat_id = chat_id
+        
+        # 중복 메시지 체크를 먼저 수행 (리소스 절약)
+        if store.is_message_processed(numeric_chat_id, msg.id):
+            mlog.info(f"⏭️ 이미 처리된 메시지 건너뜀: chat_id={numeric_chat_id}, msg_id={msg.id}")
             return
 
         # 모든 메시지에 대한 기본 로깅 (디버깅용)
         message_text = getattr(msg, "message", "").strip()
         mlog.info(f"📨 메시지 수신: chat_id={chat_id}, msg_id={msg.id}, len={len(message_text)}, preview={message_text[:50]}...")
 
-        # 채널 필터링: chat_id가 -100으로 시작하는 경우만 채널
-        if not str(chat_id).startswith("-100"):
+        # 채널 필터링: chat_id가 -100으로 시작하거나 @username 형태인 경우 채널
+        chat_id_str = str(chat_id)
+        is_channel = chat_id_str.startswith("-100") or chat_id_str.startswith("@")
+        
+        if not is_channel:
             mlog.info(f"❌ 메시지 버림: 채팅방 메시지 (chat_id={chat_id}) - 채널만 모니터링")
             return
 
-        # 댓글/연동 대화방 메시지 무시: reply_to, top_msg, megagroup 등
+        # 채널 댓글 스레드 감지 및 처리
         try:
+            # 메시지 스레드 ID 확인 (채널 댓글 스레드)
+            message_thread_id = getattr(msg, 'message_thread_id', None)
             is_comment = bool(getattr(msg, 'reply_to_msg_id', None)) or bool(getattr(msg, 'reply_to', None))
+            
             # 스레드 최상단 메시지가 있는 경우(댓글/토픽)
             has_top_thread = bool(getattr(msg, 'replies', None) and getattr(getattr(msg, 'replies', None), 'forum_topic', False))
-        except Exception:
-            is_comment = False
-            has_top_thread = False
+            
+            # 채널 댓글 스레드 감지: supergroup이고 message_thread_id가 존재하는 경우
+            if message_thread_id is not None:
+                # 채널 메타데이터에서 타입 확인
+                meta = await get_channel_meta(chat_id)
+                if meta.get("chat_type") == "supergroup":
+                    mlog.info(f"❌ 메시지 버림: 채널 댓글 스레드 메시지 (chat_id={chat_id}, msg_id={msg.id}, thread_id={message_thread_id})")
+                    return
+            
+            # 일반 댓글/스레드 무시 로직
+            if is_comment and not has_top_thread:
+                mlog.info(f"❌ 메시지 버림: 댓글 메시지 (chat_id={chat_id}, msg_id={msg.id})")
+                return
+            elif has_top_thread:
+                mlog.info(f"❌ 메시지 버림: 토픽 스레드 메시지 (chat_id={chat_id}, msg_id={msg.id})")
+                return
+                
+        except Exception as e:
+            mlog.warning(f"채널 댓글 스레드 감지 중 오류: {e}")
+            # 오류 발생 시 기본적으로 처리 진행
+
+        # @username 형태의 chat_id를 숫자 ID로 변환
+        numeric_chat_id = chat_id
+        if isinstance(chat_id, str) and chat_id.startswith("@"):
+            try:
+                # @username을 숫자 ID로 변환
+                entity = await tg.client.get_entity(chat_id)
+                # entity가 유효한지 확인하고 타입 체크 (Channel, User, Chat 등 허용)
+                if (hasattr(entity, 'id') and 
+                    not isinstance(entity, str) and 
+                    hasattr(entity, '__class__')):
+                    numeric_chat_id = utils.get_peer_id(entity)
+                    mlog.info(f"@username을 숫자 ID로 변환: {chat_id} → {numeric_chat_id}")
+                else:
+                    mlog.warning(f"유효하지 않은 엔티티 타입: {chat_id}, 타입: {type(entity)}, 클래스: {getattr(entity, '__class__', 'Unknown')}")
+                    return
+            except Exception as e:
+                mlog.warning(f"@username을 숫자 ID로 변환 실패: {chat_id}, 에러: {e}")
+                return
         
-        # 댓글/스레드 무시 로직 완화: 실제 댓글만 무시하고 일반 메시지는 허용
-        if is_comment and not has_top_thread:
-            mlog.info(f"❌ 메시지 버림: 댓글 메시지 (chat_id={chat_id}, msg_id={msg.id})")
-            return
-        elif has_top_thread:
-            mlog.info(f"❌ 메시지 버림: 토픽 스레드 메시지 (chat_id={chat_id}, msg_id={msg.id})")
-            return
+        # numeric_chat_id가 정의되지 않은 경우 안전하게 처리
+        if 'numeric_chat_id' not in locals():
+            mlog.warning(f"numeric_chat_id가 정의되지 않음, chat_id 사용: {chat_id}")
+            numeric_chat_id = chat_id
 
         # 소스 채널 필터링: 설정된 채널만 처리
-        mlog.info(f"채널 필터링 확인: chat_id={chat_id}, chat_filters={chat_filters}")
-        if chat_id not in chat_filters:
+        mlog.info(f"채널 필터링 확인: chat_id={numeric_chat_id}, chat_filters={chat_filters}")
+        
+        # 제거된 채널인지 확인
+        if numeric_chat_id in removed_channels:
+            mlog.info(f"❌ 메시지 버림: 제거된 채널 - {numeric_chat_id}")
+            return
+        
+        if numeric_chat_id not in chat_filters:
             # 채널 메타데이터 가져오기
-            meta = await get_channel_meta(chat_id)
+            meta = await get_channel_meta(numeric_chat_id)
             message_text = getattr(msg, "message", "").strip()
             
             # 디버깅: 왜 이 채널이 필터에서 제외되었는지 확인
             mlog.info(
-                f"미모니터링 채널 메시지: {meta.get('title', 'Unknown')} (@{meta.get('username', 'N/A')}) (chat_id={chat_id}) "
+                f"미모니터링 채널 메시지: {meta.get('title', 'Unknown')} (@{meta.get('username', 'N/A')}) (chat_id={numeric_chat_id}) "
                 f"msg_id={msg.id}, len={len(message_text)} | {message_text[:50]}{'...' if len(message_text) > 50 else ''}"
             )
             mlog.info(f"채널 타입: megagroup={meta.get('is_megagroup')}, broadcast={meta.get('is_broadcast')}")
             
             # 방송 채널이 아닌 경우에만 무시 (메가그룹도 허용하도록 수정)
             if not meta.get('is_broadcast', False) and not meta.get('is_megagroup', False):
-                mlog.info(f"❌ 메시지 버림: 방송 채널도 메가그룹도 아님 - {meta.get('title', 'Unknown')} (chat_id={chat_id}, msg_id={msg.id})")
+                mlog.info(f"❌ 메시지 버림: 방송 채널도 메가그룹도 아님 - {meta.get('title', 'Unknown')} (chat_id={numeric_chat_id}, msg_id={msg.id})")
                 return
             else:
                 mlog.info(f"방송 채널 또는 메가그룹 - 처리 진행: {meta.get('title', 'Unknown')}")
                 # 필터에 추가
-                chat_filters.append(chat_id)
-                channel_cache[chat_id] = meta
+                chat_filters.append(numeric_chat_id)
+                channel_cache[numeric_chat_id] = meta
         else:
-            mlog.info(f"모니터링 대상 채널 확인됨: chat_id={chat_id}")
+            mlog.info(f"모니터링 대상 채널 확인됨: chat_id={numeric_chat_id}")
 
         # 메시지 내용 분석
         message_text = getattr(msg, "message", "").strip()
@@ -344,16 +521,16 @@ async def main() -> None:
         has_media = bool(msg.media)
         
         # 모든 수신 메시지 로깅 (INFO 레벨)
-        meta = channel_cache.get(chat_id) or {}
+        meta = channel_cache.get(numeric_chat_id) or {}
         mlog.info(
-            f"수신 메시지: {meta.get('title','Unknown')} ({meta.get('username') or chat_id}) "
+            f"수신 메시지: {meta.get('title','Unknown')} ({meta.get('username') or numeric_chat_id}) "
             f"msg_id={msg.id}, len={len(message_text)} | {message_text[:50]}{'...' if len(message_text) > 50 else ''}"
         )
-        mlog.info(f"현재 처리 중인 채널 chat_id: {chat_id}, 모니터링 대상 여부: {chat_id in chat_filters}")
+        mlog.info(f"현재 처리 중인 채널 chat_id: {numeric_chat_id}, 모니터링 대상 여부: {numeric_chat_id in chat_filters}")
         
         # 텍스트가 없고 미디어도 없는 경우 무시
         if not has_text and not has_media:
-            mlog.info(f"❌ 메시지 버림: 빈 메시지 (chat_id={chat_id}, msg_id={msg.id}) - 텍스트와 미디어 모두 없음")
+            mlog.info(f"❌ 메시지 버림: 빈 메시지 (chat_id={numeric_chat_id}, msg_id={msg.id}) - 텍스트와 미디어 모두 없음")
             return
 
         # Forward 메시지 확인 및 원본 정보 추출
@@ -363,28 +540,51 @@ async def main() -> None:
         mlog.info(f"메시지 포워드 여부: {is_forward}, 원본 chat_id: {original_chat_id}")
         
         # 포워드 메시지가 아닌데 모니터링 대상이 아닌 채널인 경우 무시
-        if not is_forward and chat_id not in chat_filters:
-            mlog.info(f"❌ 메시지 버림: 일반 메시지이지만 모니터링 대상이 아닌 채널 (chat_id={chat_id}, msg_id={msg.id})")
+        if not is_forward and numeric_chat_id not in chat_filters:
+            mlog.info(f"❌ 메시지 버림: 일반 메시지이지만 모니터링 대상이 아닌 채널 (chat_id={numeric_chat_id}, msg_id={msg.id})")
             return
         
         # 포워드된 메시지의 경우 원본 채널이 모니터링 대상인지 확인
         if is_forward and original_chat_id:
             # 포워드한 채널 정보 가져오기
-            forward_channel_meta = await get_channel_meta(chat_id)
+            forward_channel_meta = await get_channel_meta(numeric_chat_id)
             original_channel_meta = await get_channel_meta(original_chat_id)
             
             mlog.info(f"=== 포워드 메시지 채널 정보 ===")
-            mlog.info(f"포워드한 채널: {forward_channel_meta.get('title', 'Unknown')} (@{forward_channel_meta.get('username', 'N/A')}) [ID: {chat_id}]")
+            mlog.info(f"포워드한 채널: {forward_channel_meta.get('title', 'Unknown')} (@{forward_channel_meta.get('username', 'N/A')}) [ID: {numeric_chat_id}]")
             mlog.info(f"원본 채널: {original_channel_meta.get('title', 'Unknown')} (@{original_channel_meta.get('username', 'N/A')}) [ID: {original_chat_id}]")
             mlog.info(f"모니터링 대상 채널 목록: {chat_filters}")
             
-            # 포워드 메시지는 원본 채널이 모니터링 대상이 아니어도 처리 (요구사항 4번)
+            # 원본 채널이 모니터링 대상이 아닌 경우 자동으로 추가
             if original_chat_id not in chat_filters:
-                mlog.info(f"포워드 메시지 처리: 원본 채널이 모니터링 대상이 아니지만 포워드 메시지이므로 처리 진행")
+                mlog.info(f"🔍 새로운 원본 채널 발견: {original_channel_meta.get('title', 'Unknown')} (@{original_channel_meta.get('username', 'N/A')}) [ID: {original_chat_id}]")
+                
+                # 원본 채널을 SOURCE_CHANNELS에 추가 (@username 형태로)
+                original_channel_str = str(original_chat_id)
+                
+                # @username 형태로 변환 시도
+                try:
+                    from app.config import get_channel_username_async
+                    username_form = await get_channel_username_async(original_channel_str, tg.client)
+                    mlog.info(f"채널 ID 변환: {original_channel_str} → {username_form}")
+                except Exception as e:
+                    mlog.warning(f"채널 ID 변환 실패, 원본 사용: {e}")
+                    username_form = original_channel_str
+                
+                if add_source_channel(username_form):
+                    mlog.info(f"✅ 원본 채널을 SOURCE_CHANNELS에 추가 완료: {username_form}")
+                    # chat_filters에 즉시 추가
+                    chat_filters.append(original_chat_id)
+                    # 채널 캐시에 추가
+                    channel_cache[original_chat_id] = original_channel_meta
+                else:
+                    mlog.warning(f"⚠️ 원본 채널 추가 실패 또는 이미 존재: {username_form}")
+                
+                mlog.info(f"포워드 메시지 처리: 원본 채널이 모니터링 대상이 아니었지만 자동 추가 후 처리 진행")
             else:
                 mlog.info(f"포워드 원본 채널 모니터링 대상: {original_chat_id}")
         elif is_forward and not original_chat_id:
-            mlog.warning(f"❌ 메시지 버림: 포워드 메시지이지만 원본 채널 ID를 추출할 수 없음 (chat_id={chat_id}, msg_id={msg.id})")
+            mlog.warning(f"❌ 메시지 버림: 포워드 메시지이지만 원본 채널 ID를 추출할 수 없음 (chat_id={numeric_chat_id}, msg_id={msg.id})")
             return
         
         # 기본 텍스트 설정 (None 처리 추가)
@@ -398,7 +598,7 @@ async def main() -> None:
         
         # 텍스트가 비어있는 경우 처리
         if not text:
-            mlog.warning(f"❌ 메시지 버림: 텍스트가 비어있음 (chat_id={chat_id}, msg_id={msg.id})")
+            mlog.warning(f"❌ 메시지 버림: 텍스트가 비어있음 (chat_id={numeric_chat_id}, msg_id={msg.id})")
             return
         
         # 이미지 처리
@@ -501,14 +701,39 @@ async def main() -> None:
         message_id = original_message_id if is_forward and original_message_id else msg.id
         author = None
         
-        mlog.debug(f"저장할 메시지 정보: chat_id={chat_id}, message_id={message_id}, is_forward={is_forward}")
+        # numeric_chat_id 사용 (이미 숫자 ID로 변환됨)
+        chat_id_to_use = numeric_chat_id
+        
+        # chat_id가 정수인지 확인하고 변환
+        if not isinstance(chat_id_to_use, int):
+            try:
+                chat_id_to_use = int(chat_id_to_use)
+                mlog.info(f"chat_id를 정수로 변환: {chat_id_to_use}")
+            except (ValueError, TypeError) as e:
+                mlog.error(f"chat_id를 정수로 변환 실패: {chat_id_to_use}, 에러: {e}")
+                return
+        
+        # message_id가 정수인지 확인하고 변환
+        if not isinstance(message_id, int):
+            try:
+                message_id = int(message_id)
+                mlog.info(f"message_id를 정수로 변환: {message_id}")
+            except (ValueError, TypeError) as e:
+                mlog.error(f"message_id를 정수로 변환 실패: {message_id}, 에러: {e}")
+                return
+        
+        mlog.debug(f"저장할 메시지 정보: chat_id={chat_id_to_use}, message_id={message_id}, is_forward={is_forward}")
         
         store.insert_message(
-            chat_id=chat_id,
+            chat_id=chat_id_to_use,
             message_id=message_id,
             date_ts=now_ts,
             author=author,
             text=text,
+            original_text=raw_for_snippet,  # 원본 텍스트 추가
+            forward_text="",  # 포워드 텍스트 (기본값)
+            image_paths="[]",  # 이미지 경로들 (기본값)
+            forward_info="{}",  # 포워드 정보 (기본값)
             embedding_value=embedding_json,
             text_hash=text_hash,
         )
@@ -516,6 +741,21 @@ async def main() -> None:
         # LLM analysis
         try:
             analysis = llm.analyze(text)
+            
+            # 코인 관련성 체크
+            if not analysis.is_coin_related:
+                mlog.info(f"❌ 메시지 버림: 코인과 관련없음 (chat_id={chat_id}, msg_id={msg.id}) - {analysis.relevance_reason}")
+                return
+                
+            mlog.info(f"코인 관련성 확인: {analysis.is_coin_related} - {analysis.relevance_reason}")
+            
+            # 정보 가치 체크
+            if not analysis.has_valuable_info:
+                mlog.info(f"❌ 메시지 버림: 정보 가치 없음 (chat_id={chat_id}, msg_id={msg.id}) - {analysis.info_value_reason}")
+                return
+                
+            mlog.info(f"정보 가치 확인: {analysis.has_valuable_info} - {analysis.info_value_reason}")
+            
         except Exception as e:
             logging.getLogger("app.llm").exception("LLM analyze failed")
             mlog.error(f"❌ 메시지 버림: LLM 분석 실패 (chat_id={chat_id}, msg_id={msg.id}) - {e}")
@@ -657,6 +897,27 @@ async def main() -> None:
         # Forward to aggregator channel
         mlog.info(f"✅ 전달 승인: 중요도 충족 (chat_id={chat_id}, msg_id={message_id}, importance={analysis.importance} >= {settings.important_threshold})")
         
+        # 메시지 작성시간 정보 수집
+        try:
+            # 현재 메시지 작성시간
+            current_message_time = None
+            if hasattr(msg, 'date') and msg.date:
+                current_message_time = msg.date
+            
+            # 원본 메시지 작성시간 (포워드인 경우)
+            original_message_time = None
+            if is_forward and hasattr(msg, 'forward') and msg.forward:
+                if hasattr(msg.forward, 'date') and msg.forward.date:
+                    original_message_time = msg.forward.date
+            
+            # 시간 정보 포맷팅
+            current_time_str = format_time(current_message_time)
+            original_time_str = format_time(original_message_time)
+        except Exception as e:
+            mlog.warning(f"시간 정보 처리 실패: {e}")
+            current_time_str = None
+            original_time_str = None
+        
         # 포워드 정보 준비
         forward_info = None
         if is_forward and original_chat_id:
@@ -664,7 +925,14 @@ async def main() -> None:
             original_channel_meta = await get_channel_meta(original_chat_id)
             forward_info = {
                 "forward_channel": f"{forward_channel_meta.get('title', 'Unknown')} (@{forward_channel_meta.get('username', 'N/A')})",
-                "original_channel": f"{original_channel_meta.get('title', 'Unknown')} (@{original_channel_meta.get('username', 'N/A')})"
+                "original_channel": f"{original_channel_meta.get('title', 'Unknown')} (@{original_channel_meta.get('username', 'N/A')})",
+                "current_time": current_time_str,
+                "original_time": original_time_str
+            }
+        else:
+            # 일반 메시지인 경우에도 시간 정보 포함
+            forward_info = {
+                "current_time": current_time_str
             }
         
         html = format_html(
@@ -853,31 +1121,93 @@ async def main() -> None:
         logger.info("=== 폴링 방식 메시지 수신 시작 ===")
         
         # 초기화: 각 채널의 마지막 처리된 메시지 ID를 데이터베이스에서 가져오기
-        last_message_ids = {}
+        # 기존 채널들의 마지막 메시지 ID 로드 (안전하게)
+        try:
+            last_message_ids = store.get_all_channel_last_message_ids()
+        except Exception as e:
+            logger.warning(f"채널 마지막 메시지 ID 로드 실패: {e}")
+            last_message_ids = {}
+        
+        # 재시작 시 모든 모니터링 채널을 현재 최신 메시지 ID로 초기화하여 백필 방지
         for channel_id in chat_filters:
-            last_processed_id = store.get_last_processed_message_id(channel_id)
-            if last_processed_id:
-                last_message_ids[channel_id] = last_processed_id
-                logger.info(f"채널 {channel_id} 마지막 처리된 메시지 ID: {last_processed_id}")
-            else:
-                # 데이터베이스에 기록이 없으면 최근 메시지부터 시작
-                try:
-                    chat = entity_cache.get(channel_id)
-                    if not chat:
-                        chat = await tg.client.get_entity(channel_id)
-                        if chat:
-                            entity_cache[channel_id] = chat
-                    
+            try:
+                chat = entity_cache.get(channel_id)
+                if not chat:
+                    chat = await tg.client.get_entity(channel_id)
                     if chat:
-                        messages = await tg.client.get_messages(chat, limit=1)
-                        if messages:
-                            last_message_ids[channel_id] = messages[0].id
-                            logger.info(f"채널 {channel_id} 최신 메시지 ID로 초기화: {messages[0].id}")
-                except Exception as e:
-                    logger.warning(f"채널 {channel_id} 초기화 실패: {e}")
+                        entity_cache[channel_id] = chat
+                
+                latest_id = 0
+                if chat:
+                    messages = await tg.client.get_messages(chat, limit=1)
+                    if messages:
+                        latest_id = messages[0].id
+                
+                last_message_ids[channel_id] = latest_id
+                store.update_channel_last_message_id(channel_id, latest_id)
+                logger.info(f"채널 {channel_id} 최신 메시지 ID 초기화: {latest_id}")
+            except Exception as e:
+                logger.warning(f"채널 {channel_id} 초기화 실패: {e}")
+        
+        # 기존 채널들의 마지막 메시지 ID 로깅
+        for channel_id, last_id in last_message_ids.items():
+            if channel_id in chat_filters:
+                logger.info(f"채널 {channel_id} 마지막 메시지 ID: {last_id}")
         
         while True:
             try:
+                # SOURCE_CHANNELS 최신화 후 숫자 ID로 정규화
+                raw_updated_chat_filters = load_source_channels()
+                normalized_updated_chat_filters = []
+                for ch in raw_updated_chat_filters:
+                    if ch in removed_channels:
+                        continue
+                    try:
+                        # 엔티티를 가져와 숫자 ID로 변환
+                        ent = await tg.client.get_entity(ch)
+                        if (hasattr(ent, 'id') and not isinstance(ent, str) and hasattr(ent, '__class__')):
+                            numeric_id = utils.get_peer_id(ent)
+                            # 엔티티 캐시 업데이트
+                            entity_cache[numeric_id] = ent
+                            normalized_updated_chat_filters.append(numeric_id)
+                        else:
+                            logger.warning(f"유효하지 않은 엔티티 타입: {type(ent)} (채널: {ch})")
+                    except Exception as e:
+                        logger.warning(f"채널 정규화 실패: {ch} - {e}")
+                        continue
+
+                if normalized_updated_chat_filters != chat_filters:
+                    logger.info(f"🔄 SOURCE_CHANNELS 업데이트 감지: {len(chat_filters)} → {len(normalized_updated_chat_filters)}")
+                    new_channels = set(normalized_updated_chat_filters) - set(chat_filters)
+                    if new_channels:
+                        logger.info(f"새로운 채널: {new_channels}")
+                    else:
+                        logger.info(f"제거된 채널이 다시 로딩되어 필터링됨: {removed_channels}")
+
+                    # 새로운 채널들의 최신 메시지 ID를 현재 최신으로 초기화하여 백필 처리 방지
+                    for new_channel_id in new_channels:
+                        try:
+                            chat = entity_cache.get(new_channel_id)
+                            if not chat:
+                                chat = await tg.client.get_entity(new_channel_id)
+                                if chat:
+                                    entity_cache[new_channel_id] = chat
+
+                            latest_id = 0
+                            if chat:
+                                msgs = await tg.client.get_messages(chat, limit=1)
+                                if msgs:
+                                    latest_id = msgs[0].id
+
+                            last_message_ids[new_channel_id] = latest_id
+                            store.update_channel_last_message_id(new_channel_id, latest_id)
+                            logger.info(f"새 채널 {new_channel_id} 최신 메시지 ID 초기화: {latest_id}")
+                        except Exception as e:
+                            logger.warning(f"새 채널 {new_channel_id} 초기화 실패: {e}")
+
+                    chat_filters.clear()
+                    chat_filters.extend(normalized_updated_chat_filters)
+                
                 for channel_id in chat_filters:
                     try:
                         # 채널 정보 가져오기 (엔티티 캐시 활용)
@@ -893,7 +1223,7 @@ async def main() -> None:
                         
                         # 마지막 처리된 메시지 ID 이후의 메시지만 가져오기
                         last_known_id = last_message_ids.get(channel_id, 0)
-                        messages = await tg.client.get_messages(chat, min_id=last_known_id, limit=20)
+                        messages = await tg.client.get_messages(chat, min_id=last_known_id, limit=50)
                         
                         if not messages:
                             continue
@@ -917,17 +1247,28 @@ async def main() -> None:
                                                 self.chat_id = chat_id
                                                 self.chat = None
                                         
-                                        event = EventWrapper(msg, channel_id)
+                                        # 폴링 메시지의 경우 chat_id가 이미 숫자 ID이므로 numeric_chat_id로 설정
+                                        numeric_chat_id = channel_id
+                                        
+                                        event = EventWrapper(msg, numeric_chat_id)
                                         await handle_message(event)
+                                        
+                                        # 처리 완료 후 DB에 기록 (중복 방지)
+                                        store.mark_message_processed(channel_id, msg.id)
                                         logger.info(f"✅ 폴링 메시지 처리 완료: {channel_title} (ID: {msg.id})")
                                     except Exception as e:
                                         logger.error(f"❌ 폴링 메시지 처리 실패: {channel_title} (ID: {msg.id}) - {e}")
+                                        # 실패한 메시지도 DB에 기록하여 재시도 방지
+                                        store.mark_message_processed(channel_id, msg.id)
                                 else:
                                     logger.debug(f"⏭️ 이미 처리된 메시지 건너뜀: {channel_title} (ID: {msg.id})")
                             
-                            # 마지막 메시지 ID 업데이트
+                            # 마지막 메시지 ID 업데이트 (DB에 저장)
                             if messages:
-                                last_message_ids[channel_id] = max(msg.id for msg in messages)
+                                latest_message_id = max(msg.id for msg in messages)
+                                last_message_ids[channel_id] = latest_message_id
+                                store.update_channel_last_message_id(channel_id, latest_message_id)
+                                logger.info(f"채널 {channel_id} 최신 메시지 ID 업데이트: {latest_message_id}")
                             
                     except Exception as e:
                         logger.warning(f"폴링 중 오류 (채널 {channel_id}): {e}")

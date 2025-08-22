@@ -115,9 +115,21 @@ def format_html(
     
     # 포워드 정보 추가
     if forward_info:
-        forward_channel = escape(forward_info.get("forward_channel", "Unknown"))
-        original_channel = escape(forward_info.get("original_channel", "Unknown"))
-        html += f"<b>📤 포워드:</b> {forward_channel} → {original_channel}\n"
+        forward_channel = forward_info.get("forward_channel")
+        original_channel = forward_info.get("original_channel")
+        
+        if forward_channel and original_channel:
+            # 포워드 메시지인 경우
+            html += f"<b>📤 포워드:</b> {escape(forward_channel)} → {escape(original_channel)}\n"
+        
+        # 시간 정보 추가 (포워드/일반 메시지 모두)
+        current_time = forward_info.get("current_time")
+        original_time = forward_info.get("original_time")
+        
+        if current_time:
+            html += f"<b>📅 작성시간:</b> {escape(current_time)}\n"
+        if original_time:
+            html += f"<b>📅 원본 작성시간:</b> {escape(original_time)}\n"
     
     if original_link_escaped:
         html += f"<a href=\"{original_link_escaped}\">원문 열기</a>"

@@ -33,7 +33,14 @@ async def _main(args) -> None:
         entity = dialog.entity
         title = dialog.name
         username = getattr(entity, "username", None)
-        peer_id = utils.get_peer_id(entity)
+        # entity가 유효한 Peer 객체인지 확인 (Channel, User, Chat 등 허용)
+        if (hasattr(entity, 'id') and 
+            not isinstance(entity, str) and 
+            hasattr(entity, '__class__')):
+            peer_id = utils.get_peer_id(entity)
+        else:
+            print(f"유효하지 않은 엔티티 타입 건너뜀: {type(entity)}")
+            continue
 
         entry_type = "unknown"
         include = False
@@ -88,18 +95,22 @@ async def _main(args) -> None:
                 except Exception:
                     linked_entity = None
             if isinstance(linked_entity, Channel):
-                linked_peer = utils.get_peer_id(linked_entity)
-                if linked_peer not in seen_peer_ids:
-                    extra_rows.append(
-                        {
-                            "type": "channel",
-                            "title": getattr(linked_entity, "title", "") or "",
-                            "username": getattr(linked_entity, "username", None),
-                            "peer_id": linked_peer,
-                            "_entity": linked_entity,
-                        }
-                    )
-                    seen_peer_ids.add(linked_peer)
+                # linked_entity가 유효한 Peer 객체인지 확인 (Channel, User, Chat 등 허용)
+                if (hasattr(linked_entity, 'id') and 
+                    not isinstance(linked_entity, str) and 
+                    hasattr(linked_entity, '__class__')):
+                    linked_peer = utils.get_peer_id(linked_entity)
+                    if linked_peer not in seen_peer_ids:
+                        extra_rows.append(
+                            {
+                                "type": "channel",
+                                "title": getattr(linked_entity, "title", "") or "",
+                                "username": getattr(linked_entity, "username", None),
+                                "peer_id": linked_peer,
+                                "_entity": linked_entity,
+                            }
+                        )
+                        seen_peer_ids.add(linked_peer)
         rows.extend(extra_rows)
 
     # Sort for stable output
